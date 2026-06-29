@@ -35,8 +35,6 @@ def _build_broker_markets() -> Dict[str, Dict[str, Set[str]]]:
     matrix: Dict[str, Dict[str, Set[str]]] = {
         # US stocks via Interactive Brokers (TWS/Gateway, local desktop only)
         "ibkr": {"USStock": {"spot"}},
-        # Forex via MetaTrader 5 terminal (local desktop only)
-        "mt5": {"Forex": {"spot"}},
         # Alpaca: REST broker for US equities + crypto.
         # Crypto is *spot only* on Alpaca - they have no perpetual / margin
         # crypto product, so a 'swap' market_type is impossible regardless of
@@ -67,22 +65,22 @@ LONG_ONLY_BROKERS: Set[str] = {"ibkr", "alpaca"}
 # Map bot strategy type -> markets where that bot makes sense and can
 # actually execute. Reasoning:
 #   grid: needs continuous high-frequency quotes + bidirectional. USStock
-#         dies during the 16-hour close + open gaps. OK on Crypto and Forex.
+#         dies during the 16-hour close + open gaps. OK on Crypto.
 #   martingale: needs tiny add-on lots + bidirectional. Stock min-share size
 #               + gap risk makes it impractical outside crypto perpetuals.
 #   dca / trend: long-only by nature, fine on every market we support.
 BOT_TYPE_MARKETS: Dict[str, Set[str]] = {
-    "grid":       {"Crypto", "Forex"},
+    "grid":       {"Crypto"},
     "martingale": {"Crypto"},
-    "dca":        {"Crypto", "USStock", "Forex"},
-    "trend":      {"Crypto", "USStock", "Forex"},
+    "dca":        {"Crypto", "USStock"},
+    "trend":      {"Crypto", "USStock"},
 }
 
 
 # Markets we recognize as legal canonical values. Anything outside this set
 # is considered analysis/backtest-only (e.g. CNStock, HKStock, MOEX, Futures
 # generic) and may not be used for live strategies.
-LIVE_MARKET_CATEGORIES: Set[str] = {"Crypto", "USStock", "Forex"}
+LIVE_MARKET_CATEGORIES: Set[str] = {"Crypto", "USStock"}
 
 
 # ---------------------------------------------------------------------------
@@ -163,8 +161,7 @@ def validate_strategy_config(
         3. (broker, market) combination must be in BROKER_MARKETS.
         4. market_type must be in allowed_market_types(broker, market).
         5. Long-only brokers (ibkr, alpaca) must have trade_direction='long'.
-        6. For Crypto, short signals require market_type='swap' (Forex on
-           MT5 stores spot but is naturally bidirectional).
+        6. For Crypto, short signals require market_type='swap'.
         7. bot_type must be compatible with market_category.
 
     Returns:
@@ -234,13 +231,11 @@ def validate_strategy_config(
             f"{ex.upper()} live execution in QuantDinger is currently "
             f"long-only (got trade_direction='{td}'). For short selling "
             f"please use a perpetual-swap crypto exchange "
-            f"(Binance/OKX/Bybit/Bitget) for crypto, or MT5 for forex. "
+            f"(Binance/OKX/Bybit/Bitget) for crypto. "
             f"Stock short selling on IBKR/Alpaca is not yet implemented."
         )
 
     # Rule 6: crypto short requires swap.
-    # Forex on MT5 stores market_type='spot' but is naturally bidirectional
-    # (short = SELL), so this rule only applies to crypto markets.
     if mc == "Crypto" and td == "short" and mt and mt != "swap":
         raise ValueError(
             f"Short selling crypto requires market_type='swap', got '{mt}'. "

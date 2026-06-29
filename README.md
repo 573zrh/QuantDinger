@@ -6,6 +6,7 @@
   <h1>QuantDinger</h1>
   <h3>The open-source AI infrastructure layer for quant trading</h3>
   <p><strong>Turn trading ideas into Python strategies, backtests, paper trading, and live execution - all in one self-hosted stack.</strong></p>
+  <p><strong>QuantDinger is a product of Open Byte Inc.</strong></p>
   <p><em>AI research -> Strategy code -> Backtest -> Paper/Live execution -> Monitoring</em></p>
 
   <div align="center" style="max-width: 680px; margin: 1.25rem auto 0; padding: 20px 22px 22px; border: 1px solid #d1d9e0; border-radius: 16px;">
@@ -84,7 +85,7 @@ irm https://raw.githubusercontent.com/brokermr810/QuantDinger/main/install.ps1 |
 
 Installs to `~/quantdinger` on Linux/macOS and `$HOME\quantdinger` on Windows by default. Override with `... | bash -s -- /opt/quantdinger` or `$env:QUANTDINGER_INSTALL_DIR="C:\QuantDinger"` before the PowerShell one-liner.
 
-Then open **`http://localhost:8888`** and sign in with the admin username/password you entered during installation.
+Then open **`http://localhost:8888`** and sign in with the admin username/password you entered during installation. The same stack also serves the mobile H5 client at **`http://localhost:8889`**.
 
 <details>
 <summary><b>Windows, manual clone, or mirror troubleshooting</b></summary>
@@ -136,7 +137,7 @@ For step-by-step detail and troubleshooting, see **[Installation & first-time se
 | SaaS platforms hold API keys | User-owned deployment — your infra, your keys |
 | AI agents without scopes or audit | Scoped Agent Gateway, paper-only default, audit logs |
 
-QuantDinger is a **self-hosted, local-first** quantitative infrastructure layer — not a chatbot with a buy button. It unifies **multi-LLM research**, **Python-native strategy engines**, **server-side backtesting**, and **multi-broker live execution** (10+ crypto venues, IBKR, MT5, Alpaca) in one production-grade stack you fully control.
+QuantDinger is a **self-hosted, local-first** quantitative infrastructure layer — not a chatbot with a buy button. It unifies **multi-LLM research**, **Python-native strategy engines**, **server-side backtesting**, and **multi-broker live execution** (10+ crypto venues, IBKR, Alpaca) in one production-grade stack you fully control.
 
 ## Safety model
 
@@ -174,7 +175,7 @@ QuantDinger is a **self-hosted, local-first** quantitative infrastructure layer 
 | **Full-stack quant OS** | Charting, indicator IDE, AI research, backtests, live bots, quick trade, and broker account management — one product, one Postgres state store. |
 | **Agent-native** | First-class **Agent Gateway** (`/api/agent/v1`) + **[`quantdinger-mcp`](https://pypi.org/project/quantdinger-mcp/)** on PyPI — Cursor, Claude Code, and Codex can read markets, run backtests, and trade (paper by default) with full audit logs. |
 | **Dual strategy runtimes** | **`IndicatorStrategy`** (vectorized dataframe signals + chart overlays) and **`ScriptStrategy`** (event-driven `on_bar`, explicit orders) — research and production in the same codebase. |
-| **Multi-venue execution** | CCXT crypto (Binance, OKX, Bybit, ...), **IBKR** stocks, **MT5** forex, **Alpaca** US equities/ETFs/crypto — unified Broker Accounts page with isolated multi-tenant sessions. |
+| **Multi-venue execution** | CCXT crypto (Binance, OKX, Bybit, ...), **IBKR** stocks, **Alpaca** US equities/ETFs/crypto — unified Broker Accounts page with isolated multi-tenant sessions. |
 | **Production-grade infra** | **PostgreSQL 16** + **Redis 7**, connection pooling, background workers (orders, portfolio monitor, reflection), idempotent schema bootstrap, GHCR multi-arch images (amd64/arm64). |
 | **Security by default** | Refuses default `SECRET_KEY`, agent tokens hashed at rest, **paper-only trading** unless explicitly unlocked server-side, every agent call audit-logged. |
 | **Operator-ready** | OAuth, multi-user roles, credits/membership/USDT billing toggles, AWS Marketplace AMI, an 11-language web UI, and multilingual docs — build a commercial quant product on top, not just a hobby bot. |
@@ -200,15 +201,15 @@ docker compose -f docker-compose.ghcr.yml up -d
 
 ## Related repositories
 
-This repo ships the **backend**, **Docker Compose** stack, and **documentation**. The web UI image is published independently to GHCR by the sibling Vue repo. Use the sibling repos when you need source-level UI changes or the mobile app:
+This repo ships the **backend**, **Docker Compose** stack, and **documentation**. The web UI and mobile H5 images are published independently to GHCR by sibling repos. Use the sibling repos when you need source-level UI changes or native mobile builds:
 
 | Repository | What it is |
 |------------|------------|
 | **[QuantDinger](https://github.com/brokermr810/QuantDinger)** (this repo) | Backend (Flask/Python), Compose stack, docs |
 | **[QuantDinger-Vue](https://github.com/brokermr810/QuantDinger-Vue)** | **Web frontend source** (Vue) — tagging `v*` publishes `ghcr.io/brokermr810/quantdinger-frontend` automatically |
-| **[QuantDinger-Mobile](https://github.com/brokermr810/QuantDinger-Mobile)** | **Open-source mobile client** — pairs with your self-hosted or SaaS backend |
+| **[QuantDinger-Mobile](https://github.com/brokermr810/QuantDinger-Mobile)** | **Mobile + H5 client** — Compose serves the H5 image at `http://localhost:8889`; the repo also builds native shells |
 
-**Note:** Node.js is only required if you build the web UI from **QuantDinger-Vue**; the default Docker quick start pulls the published image and does not need it.
+**Note:** Node.js is only required if you build the web or mobile UI from source; the default Docker quick start pulls the published images and does not need it. For source builds, use **Node 22 LTS** as the shared local version: the mobile H5 repo requires Node **20.19+ or 22.12+** (Vite 7), and the desktop web repo also works on Node 22.
 
 ## Use it from an AI agent (Cursor / Claude Code / Codex / MCP)
 
@@ -272,7 +273,7 @@ Deeper references: [AI Integration design](docs/agent/AI_INTEGRATION_DESIGN.md) 
 - **Research & AI** — Multi-LLM ensemble analysis, watchlists, opportunity radar, NL→Indicator/strategy, post-backtest AI hints; optional confidence calibration. **[Agent Gateway + MCP](#use-it-from-an-ai-agent-cursor--claude-code--codex--mcp)** for Cursor / Claude Code / Codex with scoped tokens and SSE job streaming.
 - **Build** — Professional KLine chart UI; `IndicatorStrategy` (dataframe `buy`/`sell` signals) and `ScriptStrategy` (`on_bar`, `ctx.buy()` / `ctx.sell()`); AI code generation as a starting point, Python as source of truth.
 - **Validate** — Server-side backtests with equity curves, drawdown metrics, trade logs, and strategy snapshots — no client-side-only backtest theater.
-- **Operate** — Live strategy bots, quick trade, **10+ crypto exchanges** via CCXT, **IBKR** / **MT5** / **Alpaca** (US stocks, ETFs, crypto); unified **Broker Accounts** page; notifications (Telegram, email, SMS, Discord, webhooks).
+- **Operate** — Live strategy bots, quick trade, **10+ crypto exchanges** via CCXT, **IBKR** / **Alpaca** (US stocks, ETFs, crypto); unified **Broker Accounts** page; notifications (Telegram, email, SMS, Discord, webhooks).
 - **Platform** — Docker Compose + GHCR images, PostgreSQL 16, Redis 7, OAuth, multi-user RBAC, credits / membership / USDT billing toggles, AWS Marketplace AMI, an 11-language web UI, and multilingual documentation.
 
 ## Architecture
@@ -313,7 +314,7 @@ flowchart LR
     subgraph EXT[External Integrations]
         LLM[LLM Providers]
         EXCH[Crypto Exchanges]
-        BROKER[IBKR / MT5 / Alpaca]
+        BROKER[IBKR / Alpaca]
         MARKET[Market Data / News]
         PAY[TronGrid / USDT Payment]
         NOTIFY[Telegram / Email / SMS / Webhook]
@@ -353,7 +354,7 @@ This section mirrors a typical “local deploy” path: **prepare the host → o
 |------|--------|
 | [Docker](https://docs.docker.com/get-docker/) + Docker Compose v2 | Used for Postgres, Redis, API, and static UI. |
 | `git` | To clone this repository. |
-| Ports (defaults) | `8888` (web), `5000` (API, bound to **127.0.0.1**), `5432` / `6379` (DB/Redis, loopback by default). Change via root `.env` if they collide. |
+| Ports (defaults) | `8888` (desktop web), `8889` (mobile H5), `5000` (API, bound to **127.0.0.1**), `5432` / `6379` (DB/Redis, loopback by default). Change via root `.env` if they collide. |
 | Disk | Postgres volume grows with users, strategies, and logs; plan a few GB minimum for serious use. |
 
 ### 1) Clone the repository
@@ -406,7 +407,7 @@ docker compose up -d
 - **`backend`** — built from `./backend_api_python` on first start if no local image exists yet.
 - For UI development from Vue source, clone **QuantDinger-Vue** into `./QuantDinger-Vue/` and add `-f docker-compose.build.yml` to the command (see *Build the frontend from Vue source* below).
 
-Services: **`postgres`**, **`redis`**, **`backend`**, **`frontend`** (see `docker-compose.yml`).
+Services: **`postgres`**, **`redis`**, **`backend`**, **`frontend`**, **`mobile`** (see `docker-compose.yml`).
 
 #### Alternative: zero-repo install from GHCR (lightest)
 
@@ -423,28 +424,30 @@ The backend entrypoint auto-generates a random `SECRET_KEY` on first start and a
 
 ```env
 # Common case: lockstep both sides to one tag
-IMAGE_TAG=4.0.1
+IMAGE_TAG=4.0.4
 
 # Advanced (opt-in): decouple sides. Either var alone overrides only
 # that side; the other still follows IMAGE_TAG.
-# BACKEND_TAG=4.0.1
-# FRONTEND_TAG=4.0.1
+# BACKEND_TAG=4.0.4
+# FRONTEND_TAG=4.0.4
+# MOBILE_TAG=4.0.3
 
 # BACKEND_IMAGE=ghcr.io/<your-fork>/quantdinger-backend     # optional, for forks
 # FRONTEND_IMAGE=ghcr.io/<your-fork>/quantdinger-frontend
+# MOBILE_IMAGE=ghcr.io/<your-fork>/quantdinger-mobile
 ```
 
-Tag resolution: `BACKEND_TAG` / `FRONTEND_TAG` → `IMAGE_TAG` → compose default (`latest`). Without a root `.env`, both compose files pull `ghcr.io/brokermr810/quantdinger-{backend,frontend}:latest`. Pin a specific release by setting `IMAGE_TAG` (lockstep) or `BACKEND_TAG` / `FRONTEND_TAG` (per-side) — see [GitHub Releases](https://github.com/brokermr810/QuantDinger/releases) for available tags.
+Tag resolution: `BACKEND_TAG` / `FRONTEND_TAG` / `MOBILE_TAG` → `IMAGE_TAG` → compose default (`latest`). Without a root `.env`, compose pulls `ghcr.io/brokermr810/quantdinger-{backend,frontend,mobile}:latest`. Pin a specific release by setting `IMAGE_TAG` (lockstep) or a per-side tag — see [GitHub Releases](https://github.com/brokermr810/QuantDinger/releases) for available tags.
 
 #### Version stamping
 
-Published backend images are stamped from the Git release tag automatically. A `v4.0.1` tag becomes `APP_VERSION=4.0.1`, which is what OpenAPI metadata and the UI brand config expose. Local source runs fall back to `git describe` and then the repo-root `VERSION` file; local Docker builds can override explicitly:
+Published backend images are stamped from the Git release tag automatically. A `v4.0.4` tag becomes `APP_VERSION=4.0.4`, which is what OpenAPI metadata and the UI brand config expose. Local source runs fall back to `git describe` and then the repo-root `VERSION` file; local Docker builds can override explicitly:
 
 ```bash
 APP_VERSION=$(git describe --tags --abbrev=0 | sed 's/^v//') docker compose up -d --build backend
 ```
 
-#### Alternative: build the frontend from Vue source
+#### Alternative: build the frontend or mobile H5 from source
 
 If you have access to the **QuantDinger-Vue** repo and want to iterate on UI source (theme tweaks, forks, debugging) instead of pulling the published image, clone it into the `./QuantDinger-Vue/` slot at the repo root (gitignored) and let Compose build from there:
 
@@ -453,13 +456,16 @@ git clone https://github.com/brokermr810/QuantDinger-Vue.git QuantDinger-Vue
 docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
 ```
 
-The main `docker-compose.yml` only pulls the GHCR image; the override file `docker-compose.build.yml` adds the local `build:` block. Without the override, `./QuantDinger-Vue/` does not need to exist. Point `FRONTEND_SRC_PATH=/abs/path/to/QuantDinger-Vue` if you'd rather keep the source somewhere else, or set `COMPOSE_FILE=docker-compose.yml:docker-compose.build.yml` in a root `.env` to skip the long `-f -f` invocation. The locally built image is tagged the same way as the published one (`FRONTEND_TAG` / `IMAGE_TAG` rules apply), so it slots into the rest of the stack with no further changes.
+The same override can build the mobile H5 client from `./QuantDinger-Mobile/` or `MOBILE_SRC_PATH=/abs/path/to/QuantDinger-Mobile`.
+
+The main `docker-compose.yml` only pulls GHCR images; the override file `docker-compose.build.yml` adds local `build:` blocks. Without the override, `./QuantDinger-Vue/` and `./QuantDinger-Mobile/` do not need to exist. Point `FRONTEND_SRC_PATH` / `MOBILE_SRC_PATH` somewhere else if you keep sources outside this repo, or set `COMPOSE_FILE=docker-compose.yml:docker-compose.build.yml` in a root `.env` to skip the long `-f -f` invocation.
 
 ### 5) Verify and sign in
 
 | Check | URL / command |
 |--------|----------------|
 | Web UI | `http://localhost:8888` (override host/port with `FRONTEND_HOST` / `FRONTEND_PORT` in root `.env` if needed). |
+| Mobile H5 | `http://localhost:8889` (override with `MOBILE_PORT`; on a phone, use your host LAN IP, for example `http://192.168.1.10:8889`). |
 | API health | `http://localhost:5000/api/health` |
 | Logs | `docker-compose logs -f backend` |
 
@@ -475,6 +481,22 @@ not shown. If an existing database still stores the old default, startup syncs
 the first admin password to the non-default env value.
 
 Also set **`FRONTEND_URL`** in `backend_api_python/.env` to the URL users actually use (including `https://` behind a reverse proxy); it affects redirects, CORS-related settings, and some generated links.
+
+### 5.1) Point the web/mobile clients at your own backend
+
+In the normal Docker stack, you usually do **not** need to edit a frontend API URL. The desktop web (`8888`) and mobile H5 (`8889`) containers proxy `/api/` to the internal `backend:5000` service.
+
+| Scenario | What to configure |
+|----------|-------------------|
+| Full `docker compose up -d` stack | Nothing for API routing. Open `http://localhost:8888` or `http://localhost:8889`; both use same-origin `/api/`. |
+| Change exposed ports | Root `.env`: `FRONTEND_PORT=8888`, `MOBILE_PORT=8889`, `BACKEND_PORT=127.0.0.1:5000`. |
+| Run frontend/mobile image without the main Compose stack | Set container env `BACKEND_URL=http://host.docker.internal:5000` or your real backend origin. This controls the Nginx `/api/` proxy inside the UI container. |
+| Desktop web source development | In `QuantDinger-Vue`, set `VITE_DEV_PROXY_TARGET=http://127.0.0.1:5000`, then run `pnpm run serve`. DevTools will show `http://localhost:8000/api/...`; Vite forwards it. |
+| Mobile H5 source development | In `QuantDinger-Mobile`, set `VITE_DEV_API_TARGET=http://127.0.0.1:5000`, then run `npm run dev`. DevTools may show `http://localhost:5173/api/...`; Vite forwards it. |
+| Static H5 behind your own domain | Prefer same-origin reverse proxy: serve `https://m.example.com` and proxy `https://m.example.com/api/` to the backend. |
+| Native mobile app | Use the app settings page to set a phone-reachable server URL, for example `http://192.168.1.10:5000` or `https://api.example.com`. |
+
+For LAN testing on a phone, do not use `localhost` inside the phone browser. Use the host machine's LAN IP, such as `http://192.168.1.10:8889`.
 
 ### 6) Optional: enable AI features
 
@@ -512,11 +534,13 @@ If `py` is not on PATH, use `python` or `python3` in the one-liner that generate
 
 | Symptom | What to check |
 |---------|----------------|
-| `QuantDinger-Vue` not found | You added `-f docker-compose.build.yml` without cloning Vue source. Drop the override (plain `docker compose up -d`) or clone into `./QuantDinger-Vue/` first. |
+| `QuantDinger-Vue` / `QuantDinger-Mobile` not found | You added `-f docker-compose.build.yml` without cloning UI source. Drop the override (plain `docker compose up -d`) or clone the needed repo into `./QuantDinger-Vue/` / `./QuantDinger-Mobile/` first. |
 | `redis` / `python` / `node` pull fails, `content size of zero` | Docker Hub unreachable from Docker Desktop. Set root `.env` `IMAGE_PREFIX=docker.m.daocloud.io/library/` and/or configure **Docker Desktop → Proxies** (system VPN alone is often not enough). |
 | Backend exits immediately | `SECRET_KEY` still default, or invalid `.env` syntax. Read `docker compose logs backend`. |
 | Blank page or API errors from browser | `FRONTEND_URL` / origins mismatch; API not reachable from the host you opened. |
-| Port already in use | Another Postgres, Redis, or local service on `5432` / `6379` / `5000` / `8888`. Adjust variables in root `.env` per `docker-compose.yml`. |
+| Mobile or web source dev calls the wrong backend | Use `VITE_DEV_PROXY_TARGET` for `QuantDinger-Vue`, `VITE_DEV_API_TARGET` for `QuantDinger-Mobile`, and restart the dev server after changing env vars. |
+| Mobile source dev fails with `crypto.hash is not a function` | Node is too old for Vite 7. Install/switch to Node 22 LTS (or at least Node 20.19+ / 22.12+). |
+| Port already in use | Another Postgres, Redis, or local service on `5432` / `6379` / `5000` / `8888` / `8889`. Adjust variables in root `.env` per `docker-compose.yml`. |
 | Many live strategies, “start denied”| Raise `STRATEGY_MAX_THREADS` in `backend_api_python/.env` and restart API (see comments in `env.example`). |
 
 ### Common Docker commands
@@ -537,8 +561,15 @@ For **custom ports** or **mirror/prefix** for base images (slow Docker Hub pulls
 
 ```ini
 FRONTEND_PORT=3000
+MOBILE_PORT=3001
 BACKEND_PORT=127.0.0.1:5001
 IMAGE_PREFIX=docker.m.daocloud.io/library/
+```
+
+When running the desktop or mobile UI containers by themselves, use `BACKEND_URL` on that container instead of the root Compose `.env` port variables:
+
+```bash
+docker run --rm -p 8889:80 -e BACKEND_URL=http://host.docker.internal:5000 ghcr.io/brokermr810/quantdinger-mobile:4.0.3
 ```
 
 Production-style TLS, domain, and reverse-proxy placement are covered in **[Cloud deployment](docs/CLOUD_DEPLOYMENT_EN.md)**.
@@ -614,10 +645,9 @@ See full examples:
 |--------|------------------|-----------|
 | US Stocks | IBKR, Alpaca, Yahoo Finance, Finnhub | Via IBKR or Alpaca (paper + live) |
 | ETFs | Alpaca | Via Alpaca (paper + live) |
-| Forex | MT5, OANDA | Via MT5 |
 | Futures | Exchange and data integrations | Data and workflow support |
 
-> **Broker Accounts page (`/broker-accounts`)** — IBKR, MT5 and Alpaca share a single unified management page: per-broker connect form, account KPIs, positions table and open-order management with one-click cancel. Multi-tenant safe: each user's session is isolated via `BrokerSessionRegistry`, so one user reconnecting doesn't kick everyone else off.
+> **Broker Accounts page (`/broker-accounts`)** — IBKR and Alpaca share a single unified management page: per-broker connect form, account KPIs, positions table and open-order management with one-click cancel. Multi-tenant safe: each user's session is isolated via `BrokerSessionRegistry`, so one user reconnecting doesn't kick everyone else off.
 
 ## Strategy Development Modes
 
@@ -656,8 +686,8 @@ QuantDinger/
 │   └── Dockerfile
 ├── docs/                    # Product, strategy, and deployment documentation
 ├── install.sh               # One-line GHCR install (curl | bash)
-├── docker-compose.yml       # Web UI via GHCR; optional ./QuantDinger-Vue/ for local UI builds
-├── docker-compose.ghcr.yml  # Zero-repo deploy — both images from GHCR
+├── docker-compose.yml       # Web UI + Mobile H5 via GHCR; optional local UI builds
+├── docker-compose.ghcr.yml  # Zero-repo deploy — app images from GHCR
 ├── LICENSE
 └── TRADEMARKS.md
 ```
@@ -688,6 +718,9 @@ Economic calendar data is free-first: QuantDinger uses the no-key AkShare/Wallst
 | Doc | Notes |
 |-----|--------|
 | [Human Web API (OpenAPI)](docs/api/openapi.yaml) | flask-smorest spec — browse with [`docs/api/index.html`](docs/api/index.html) (HTTP server required) |
+| [Backend architecture](docs/ARCHITECTURE.md) | Runtime surfaces, ownership boundaries, and refactor rules |
+| [Extension guide](docs/EXTENSION_GUIDE.md) | How to add APIs, adapters, data sources, workers, and strategy features |
+| [Module boundaries](docs/MODULE_BOUNDARIES.md) | Deeper backend module ownership notes |
 | [API conventions](docs/API_CONVENTIONS.md) | Auth, envelopes, visibility tiers |
 | [Changelog](docs/CHANGELOG.md) | Releases & migrations |
 | [README (Chinese)](docs/README_CN.md) | Chinese overview |
@@ -697,7 +730,7 @@ Economic calendar data is free-first: QuantDinger uses the no-key AkShare/Wallst
 
 **Strategy:** [EN](docs/STRATEGY_DEV_GUIDE.md) · [CN](docs/STRATEGY_DEV_GUIDE_CN.md) · [Cross-sectional EN](docs/CROSS_SECTIONAL_STRATEGY_GUIDE_EN.md) / [CN](docs/CROSS_SECTIONAL_STRATEGY_GUIDE_CN.md) · [Examples](docs/examples/)
 
-**Integrations & alerts:** [IBKR](docs/IBKR_TRADING_GUIDE_EN.md) · [MT5 EN](docs/MT5_TRADING_GUIDE_EN.md) / [CN](docs/MT5_TRADING_GUIDE_CN.md) · [OAuth EN](docs/OAUTH_CONFIG_EN.md) / [CN](docs/OAUTH_CONFIG_CN.md) · Telegram / Email / SMS configs under [`docs/`](docs/) (`NOTIFICATION_*`).
+**Integrations & alerts:** [IBKR](docs/IBKR_TRADING_GUIDE_EN.md) · [OAuth EN](docs/OAUTH_CONFIG_EN.md) / [CN](docs/OAUTH_CONFIG_CN.md) · Telegram / Email / SMS configs under [`docs/`](docs/) (`NOTIFICATION_*`).
 
 ## FAQ
 
@@ -707,7 +740,7 @@ Yes. The default deployment model is your own Docker Compose stack with your own
 
 ### Is QuantDinger only for crypto trading?
 
-No. Crypto is a major focus, but the platform also includes IBKR and Alpaca workflows for US stocks / ETFs (Alpaca additionally covers crypto) and MT5 workflows for forex.
+No. Crypto is a major focus, but the platform also includes IBKR and Alpaca workflows for US stocks / ETFs. Alpaca additionally covers crypto.
 
 ### Can I write strategies directly in Python?
 
@@ -719,11 +752,11 @@ It is both. QuantDinger is built to connect AI research, charting, strategy deve
 
 ### Can I use QuantDinger commercially?
 
-The backend is licensed under Apache 2.0. The **web** frontend source ([QuantDinger-Vue](https://github.com/brokermr810/QuantDinger-Vue)) uses a separate source-available license — review both and contact the project for commercial frontend authorization if needed. The **[mobile app repo](https://github.com/brokermr810/QuantDinger-Mobile)** is open source under its own license (see that repository).
+QuantDinger is a product of **Open Byte Inc**. The backend is licensed under Apache 2.0. The **web** frontend source ([QuantDinger-Vue](https://github.com/brokermr810/QuantDinger-Vue)) and **mobile app repo** ([QuantDinger-Mobile](https://github.com/brokermr810/QuantDinger-Mobile)) use separate source-available licenses — review each repository and contact Open Byte Inc for commercial frontend/mobile authorization if needed.
 
 ### Is there a mobile app?
 
-Yes — see **[QuantDinger-Mobile](https://github.com/brokermr810/QuantDinger-Mobile)** (open source). It connects to the same backend you self-host or to SaaS.
+Yes — the Docker stack serves the mobile H5 client at **`http://localhost:8889`**. For native Android/iOS shells, see **[QuantDinger-Mobile](https://github.com/brokermr810/QuantDinger-Mobile)**.
 
 ## Exchange Partner Links
 
@@ -740,20 +773,14 @@ The following links are available in-app under **Profile → Open account** or *
 | Gate.io | [Register](https://www.gateport.business/share/DINGER) |
 | HTX | [Register](https://www.htx.com/invite/zh-cn/1f?invite_code=dinger) |
 
-### Forex / CFD — TMGM (MetaTrader 5)
-
-| Broker | Signup Link |
-|--------|-------------|
-| TMGM (MT5) | [Register](https://portal.tmgm.com/register?node=MTM0Mzc5&language=en) |
-
-After opening a TMGM account, install MetaTrader 5 and bind your server/login under **Profile → Exchange** or **Broker Accounts**.
-
 ## License and Commercial Terms
 
 - Backend source code is licensed under **Apache License 2.0**. See `LICENSE`.
 - This repository distributes the frontend UI here as **prebuilt files** for integrated deployment.
+- QuantDinger is a product of **Open Byte Inc**. QuantDinger names, logos, product identity, and commercial licensing are managed by Open Byte Inc.
 - The frontend source code is available separately at [QuantDinger Frontend](https://github.com/brokermr810/QuantDinger-Vue) under the **QuantDinger Frontend Source-Available License v1.0**.
-- Under that frontend license, non-commercial use and eligible qualified non-profit use are permitted free of charge, while commercial use requires a separate commercial license from the copyright holder.
+- The mobile H5/native client source code is available separately at [QuantDinger Mobile](https://github.com/brokermr810/QuantDinger-Mobile) under the same source-available license family.
+- Under those frontend/mobile licenses, non-commercial use and eligible qualified non-profit use are permitted free of charge, while commercial use requires a separate commercial license from Open Byte Inc.
 - Trademark, branding, attribution, and watermark usage are governed separately and may not be removed or altered without permission. See `TRADEMARKS.md`.
 
 For commercial licensing, frontend source access, branding authorization, or deployment support:
@@ -811,3 +838,4 @@ QuantDinger stands on top of a strong open-source ecosystem. Special thanks to p
 **QuantDinger** is a small tribute to **[Erwin Schrödinger](https://en.wikipedia.org/wiki/Erwin_Schr%C3%B6dinger)** — the "-dinger" in our name is the tail of "Schrödinger". The cat in the box was a thought experiment; every un-fired strategy is its own little version of it — simultaneously winning and losing until the order actually fills. Backtests open the box. Live trading collapses the wavefunction. Trade carefully.
 
 <p align="center"><sub>If QuantDinger is useful to you, a GitHub star helps the project a lot.</sub></p>
+

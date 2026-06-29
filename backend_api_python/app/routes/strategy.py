@@ -10,6 +10,19 @@ import traceback
 import time
 
 from app.services.strategy_compiler import StrategyCompiler
+from app.services.strategy_code_quality import (
+    analyze_strategy_code_quality,
+    strategy_ai_text,
+    strategy_debug_summary,
+    strategy_hint_to_text,
+    strategy_human_summary,
+    validate_strategy_code,
+)
+from app.services.strategy_live_guard import (
+    find_live_strategy_conflict,
+    live_conflict_message,
+    strategy_live_lock_key,
+)
 from app.routes.strategy_blueprint import strategy_blp
 from app.routes.strategy_services import get_strategy_service
 from app import get_trading_executor
@@ -34,190 +47,27 @@ from app.routes import script_source_routes  # noqa: E402,F401
 
 
 def _strategy_live_lock_key(strategy: Dict[str, Any], user_id: int) -> Optional[Tuple[Any, ...]]:
-    """Return the account/symbol key that cannot run twice for live strategies."""
-    execution_mode = str(strategy.get("execution_mode") or "signal").strip().lower()
-    if execution_mode != "live":
-        return None
-
-    trading_config = strategy.get("trading_config") if isinstance(strategy.get("trading_config"), dict) else {}
-    exchange_config = strategy.get("exchange_config") if isinstance(strategy.get("exchange_config"), dict) else {}
-
-    try:
-        from app.services.exchange_execution import resolve_exchange_config
-        from app.services.live_trading.leg_context import credential_id_from_exchange_config
-        from app.services.live_trading.records import normalize_strategy_symbol
-
-        resolved_exchange = resolve_exchange_config(exchange_config, user_id=int(user_id or strategy.get("user_id") or 1))
-        exchange_id = str(
-            resolved_exchange.get("exchange_id")
-            or exchange_config.get("exchange_id")
-            or ""
-        ).strip().lower()
-        if not exchange_id:
-            return None
-
-        credential_id = int(credential_id_from_exchange_config(resolved_exchange) or credential_id_from_exchange_config(exchange_config) or 0)
-        credential_key: Any = credential_id if credential_id > 0 else f"inline:{exchange_id}"
-
-        market_type = str(
-            trading_config.get("market_type")
-            or strategy.get("market_type")
-            or resolved_exchange.get("market_type")
-            or "swap"
-        ).strip().lower()
-        if market_type in ("futures", "future", "perp", "perpetual"):
-            market_type = "swap"
-
-        symbol = (
-            strategy.get("symbol")
-            or trading_config.get("symbol")
-            or ""
-        )
-        symbol = normalize_strategy_symbol(str(symbol or "").strip()).upper()
-        if not symbol:
-            return None
-
-        return (int(user_id or strategy.get("user_id") or 0), credential_key, exchange_id, market_type, symbol)
-    except Exception as e:
-        logger.warning("strategy live lock key failed for strategy %s: %s", strategy.get("id"), e)
-        return None
+    return strategy_live_lock_key(strategy, user_id)
 
 
 def _find_live_strategy_conflict(strategy: Dict[str, Any], user_id: int) -> Optional[Dict[str, Any]]:
-    """Find another running live strategy using the same account + market + symbol."""
-    key = _strategy_live_lock_key(strategy, user_id)
-    if not key:
-        return None
-    sid = int(strategy.get("id") or 0)
-    with get_db_connection() as db:
-        cur = db.cursor()
-        cur.execute(
-            """
-            SELECT id
-            FROM qd_strategies_trading
-            WHERE user_id = ? AND status = 'running' AND execution_mode = 'live' AND id <> ?
-            """,
-            (int(user_id), sid),
-        )
-        rows = cur.fetchall() or []
-        cur.close()
-
-    service = get_strategy_service()
-    for row in rows:
-        other_id = int(row.get("id") or 0)
-        other = service.get_strategy(other_id, user_id=user_id)
-        if not other:
-            continue
-        if _strategy_live_lock_key(other, user_id) == key:
-            return {
-                "strategy_id": other_id,
-                "strategy_name": other.get("strategy_name") or other.get("name") or str(other_id),
-                "symbol": key[-1],
-                "market_type": key[-2],
-                "exchange_id": key[-3],
-            }
-    return None
+    return find_live_strategy_conflict(strategy, user_id)
 
 
 def _live_conflict_message(conflict: Dict[str, Any]) -> str:
-    return (
-        "Live strategy conflict: another running strategy already uses the same "
-        f"API key/exchange/market/symbol ({conflict.get('exchange_id')} "
-        f"{conflict.get('market_type')} {conflict.get('symbol')}). "
-        f"Please stop strategy {conflict.get('strategy_id')} "
-        f"({conflict.get('strategy_name')}) first."
-    )
+    return live_conflict_message(conflict)
 
 
 def _analyze_strategy_code_quality(code: str) -> list[dict]:
-    hints = []
-    raw = (code or "").strip()
-    if not raw:
-        return [{"severity": "error", "code": "EMPTY_CODE", "params": {}}]
-
-    has_on_init = bool(re.search(r"^\s*def\s+on_init\s*\(", raw, re.MULTILINE))
-    has_on_bar = bool(re.search(r"^\s*def\s+on_bar\s*\(", raw, re.MULTILINE))
-    has_ctx_param = bool(re.search(r"\bctx\.param\s*\(", raw))
-    has_order_intent = bool(re.search(r"\bctx\.(buy|sell|close_position)\s*\(", raw))
-
-    if not has_on_init:
-        hints.append({"severity": "warn", "code": "MISSING_ON_INIT", "params": {}})
-    if not has_on_bar:
-        hints.append({"severity": "error", "code": "MISSING_ON_BAR", "params": {}})
-    if not has_ctx_param:
-        hints.append({"severity": "info", "code": "NO_CTX_PARAM_DEFAULTS", "params": {}})
-    if not has_order_intent:
-        hints.append({"severity": "info", "code": "NO_ORDER_INTENT", "params": {}})
-    return hints
+    return analyze_strategy_code_quality(code)
 
 
 def _validate_strategy_code_internal(code: str) -> dict:
-    from app.services.strategy_script_runtime import compile_strategy_script_handlers
-
-    raw = (code or "").strip()
-    hints = _analyze_strategy_code_quality(raw)
-    if not raw:
-        return {
-            "success": False,
-            "message": "Code is empty",
-            "error_type": "EmptyCode",
-            "details": None,
-            "hints": hints,
-        }
-
-    try:
-        compile(raw, '<strategy>', 'exec')
-    except SyntaxError as se:
-        return {
-            "success": False,
-            "message": f"Syntax error at line {se.lineno}: {se.msg}",
-            "error_type": "SyntaxError",
-            "details": str(se),
-            "hints": hints,
-        }
-
-    required_funcs = ['on_bar', 'on_init']
-    found = [f for f in required_funcs if f'def {f}' in raw]
-    missing = [f for f in required_funcs if f not in found]
-    if missing:
-        return {
-            "success": False,
-            "message": f"Missing required functions: {', '.join(missing)}",
-            "error_type": "MissingFunctions",
-            "details": None,
-            "hints": hints,
-        }
-
-    try:
-        compile_strategy_script_handlers(raw)
-    except Exception as e:
-        return {
-            "success": False,
-            "message": f"Runtime Error: {e}",
-            "error_type": "RuntimeError",
-            "details": str(e),
-            "hints": hints,
-        }
-
-    return {
-        "success": True,
-        "message": "Code verification passed",
-        "error_type": None,
-        "details": None,
-        "hints": hints,
-    }
+    return validate_strategy_code(code)
 
 
 def _strategy_debug_summary(validation: dict | None = None) -> dict:
-    validation = validation or {}
-    hints = validation.get("hints") or []
-    return {
-        "success": bool(validation.get("success")),
-        "message": validation.get("message"),
-        "error_type": validation.get("error_type"),
-        "hint_codes": [h.get("code") for h in hints if h.get("code")],
-        "hint_count": len(hints),
-    }
+    return strategy_debug_summary(validation)
 
 
 def _request_lang(default: str = "zh-CN") -> str:
@@ -235,46 +85,11 @@ def _is_zh_lang(lang: str | None) -> bool:
 
 
 def _strategy_ai_text(key: str, lang: str = "zh-CN") -> str:
-    is_zh = _is_zh_lang(lang)
-    zh_texts = {
-        "prompt_empty": "提示词不能为空",
-        "no_llm_key": "未配置 LLM API Key",
-        "insufficient_credits": "积分不足，请充值后重试",
-        "invalid_json_params": "AI 未返回有效的 JSON 参数",
-        "ai_empty_result": "AI 生成结果为空",
-        "success": "success",
-    }
-    en_texts = {
-        "prompt_empty": "Prompt cannot be empty",
-        "no_llm_key": "No LLM API key configured",
-        "insufficient_credits": "Insufficient credits. Please top up and try again.",
-        "invalid_json_params": "AI did not return valid JSON parameters",
-        "ai_empty_result": "AI generation returned empty result",
-        "success": "success",
-    }
-    return (zh_texts if is_zh else en_texts).get(key, key)
+    return strategy_ai_text(key, lang)
 
 
 def _strategy_hint_to_text(hint_code: str, params: dict | None = None, lang: str = "zh-CN") -> str:
-    _ = params or {}
-    is_zh = _is_zh_lang(lang)
-    zh_texts = {
-        "MISSING_ON_INIT": "缺少 on_init(ctx) 函数。",
-        "MISSING_ON_BAR": "缺少 on_bar(ctx, bar) 函数。",
-        "NO_CTX_PARAM_DEFAULTS": "没有通过 ctx.param(...) 声明参数默认值。",
-        "NO_ORDER_INTENT": "没有检测到 ctx.buy / ctx.sell / ctx.close_position 等交易动作。",
-        "EMPTY_CODE": "策略代码为空。",
-    }
-    en_texts = {
-        "MISSING_ON_INIT": "Missing on_init(ctx) function.",
-        "MISSING_ON_BAR": "Missing on_bar(ctx, bar) function.",
-        "NO_CTX_PARAM_DEFAULTS": "No parameter defaults were declared via ctx.param(...).",
-        "NO_ORDER_INTENT": "No order intent like ctx.buy / ctx.sell / ctx.close_position was detected.",
-        "EMPTY_CODE": "Strategy code is empty.",
-    }
-    if is_zh:
-        return zh_texts.get(hint_code, f"检测到策略提示：{hint_code}")
-    return en_texts.get(hint_code, f"Strategy hint detected: {hint_code}")
+    return strategy_hint_to_text(hint_code, params, lang)
 
 
 def _strategy_human_summary(
@@ -285,43 +100,14 @@ def _strategy_human_summary(
     returned_candidate: str,
     lang: str = "zh-CN",
 ) -> dict:
-    is_zh = _is_zh_lang(lang)
-    initial_hints = initial_validation.get('hints') or []
-    final_hints = final_validation.get('hints') or []
-    initial_codes = {h.get('code') for h in initial_hints if h.get('code')}
-    final_codes = {h.get('code') for h in final_hints if h.get('code')}
-    fixed_codes = sorted(initial_codes - final_codes)
-    remaining_codes = sorted(final_codes)
-
-    fixed_messages = [
-        _strategy_hint_to_text(h.get('code'), h.get('params'), lang=lang)
-        for h in initial_hints
-        if h.get('code') in fixed_codes
-    ]
-    remaining_messages = [
-        _strategy_hint_to_text(h.get('code'), h.get('params'), lang=lang)
-        for h in final_hints
-        if h.get('code') in remaining_codes
-    ]
-
-    if auto_fix_applied and auto_fix_succeeded:
-        title = "AI 已自动修复并返回更稳定的策略代码" if is_zh else "AI auto-fixed the strategy code and returned a more stable version"
-    elif auto_fix_applied:
-        title = "AI 尝试自动修复策略代码，但仍保留部分问题" if is_zh else "AI attempted to auto-fix the strategy code, but some issues still remain"
-    else:
-        title = "AI 已生成策略代码，并通过当前质检流程" if is_zh else "AI generated strategy code and it passed the current QA flow"
-
-    if returned_candidate == 'repaired':
-        returned_text = "当前返回的是自动修复后的代码。" if is_zh else "The returned code is the auto-fixed version."
-    else:
-        returned_text = "当前返回的是首次生成的代码。" if is_zh else "The returned code is the initially generated version."
-
-    return {
-        "title": title,
-        "returned_text": returned_text,
-        "fixed_messages": fixed_messages,
-        "remaining_messages": remaining_messages,
-    }
+    return strategy_human_summary(
+        initial_validation,
+        final_validation,
+        auto_fix_applied,
+        auto_fix_succeeded,
+        returned_candidate,
+        lang=lang,
+    )
 
 @strategy_blp.route('/strategies', methods=['GET'])
 @login_required
@@ -811,7 +597,7 @@ def test_connection():
         if not ex_id:
             return jsonify({'code': 0, 'msg': 'Please select an exchange', 'data': None})
 
-        if ex_id in ('ibkr', 'mt5'):
+        if ex_id == 'ibkr':
             if not local_desktop_brokers_allowed():
                 return jsonify({'code': 0, 'msg': desktop_broker_cloud_reject_message(), 'data': None})
             logger.info("Testing connection: exchange_id=%s (local desktop broker, skipping API key check)", ex_id)
@@ -946,6 +732,7 @@ def publish_strategy_template():
             price=price,
             is_admin=is_admin,
             existing_indicator_id=existing_indicator_id,
+            source_id=source_id,
         )
         if data is not None and source_id:
             data['source_id'] = source_id
@@ -1034,353 +821,16 @@ def ai_generate_strategy():
             reference_id=f"ai_strategy_{intent}_{user_id}_{int(time.time())}"
         )
         if not ok:
-            msg = f'积分不足: {billing_msg}' if _is_zh_lang(lang) and billing_msg else _strategy_ai_text('insufficient_credits', lang)
+            msg = f'Insufficient credits: {billing_msg}' if billing_msg else _strategy_ai_text('insufficient_credits', lang)
             return jsonify({'code': '', 'msg': msg, 'params': None})
 
         if intent == 'bot_recommend':
-            # Detect (market, symbol) from prompt and fetch real K-lines.
-            # Symbol detection is delegated to ai_bot_symbol_detect so the
-            # logic is unit-testable and trivial to extend with new tickers.
-            # The route only knows: (a) what market it ended up being, and
-            # (b) what kline timeframe to ask for that market.
-            market_data_section = ""
-            detected_market: str = ""
-            detected_symbol: Optional[str] = None
+            from app.services.strategy_bot_recommend import recommend_bot_strategy
+
             try:
-                from app.services.ai_bot_symbol_detect import detect_market_and_symbol
-                from app.services.broker_market_policy import (
-                    BOT_TYPE_MARKETS, allowed_bot_types,
-                )
-                hit = detect_market_and_symbol(prompt)
-                if hit:
-                    detected_market, detected_symbol = hit
-
-                if detected_symbol:
-                    from app.services.kline import KlineService
-                    ks = KlineService()
-                    # Forex / USStock data sources may not return 4h candles;
-                    # try the broker's preferred frame first then degrade.
-                    candidate_frames = (
-                        ('4h', '1d', '1h')
-                        if detected_market == 'Crypto'
-                        else ('1d', '4h', '1h')
-                    )
-                    klines = []
-                    tf_label = ''
-                    for tf in candidate_frames:
-                        try:
-                            klines = ks.get_kline(
-                                market=detected_market,
-                                symbol=detected_symbol,
-                                timeframe=tf,
-                                limit=50 if tf in ('4h', '1h') else 30,
-                            ) or []
-                        except Exception as kl_err:
-                            logger.warning(
-                                "[AI Bot] kline fetch failed market=%s sym=%s tf=%s: %s",
-                                detected_market, detected_symbol, tf, kl_err,
-                            )
-                            klines = []
-                        if klines and len(klines) >= 5:
-                            tf_label = tf
-                            break
-
-                    if klines and len(klines) >= 5:
-                        closes = [float(k.get('close', 0)) for k in klines if k.get('close')]
-                        highs = [float(k.get('high', 0)) for k in klines if k.get('high')]
-                        lows = [float(k.get('low', 0)) for k in klines if k.get('low')]
-                        volumes = [float(k.get('volume', 0)) for k in klines if k.get('volume')]
-                        current_price = closes[-1] if closes else 0
-                        high_recent = max(highs) if highs else 0
-                        low_recent = min(lows) if lows else 0
-                        avg_price = sum(closes) / len(closes) if closes else 0
-                        avg_volume = sum(volumes) / len(volumes) if volumes else 0
-                        price_change_pct = ((closes[-1] - closes[0]) / closes[0] * 100) if closes[0] else 0
-
-                        sma5 = sum(closes[-5:]) / min(5, len(closes[-5:])) if len(closes) >= 5 else avg_price
-                        sma20 = sum(closes[-20:]) / min(20, len(closes[-20:])) if len(closes) >= 20 else avg_price
-                        volatility = ((high_recent - low_recent) / avg_price * 100) if avg_price else 0
-
-                        # Forex/USStock often have no volume data; omit the
-                        # noisy 'Avg Volume: 0.00' line in that case so the
-                        # LLM doesn't read into a meaningless number.
-                        vol_line = (
-                            f"Avg Volume: {avg_volume:.2f}\n"
-                            if avg_volume > 0 else ""
-                        )
-
-                        market_data_section = (
-                            f"\n\n=== REAL-TIME MARKET DATA for {detected_symbol} "
-                            f"(market={detected_market}, last {len(klines)} candles, {tf_label} timeframe) ===\n"
-                            f"Current Price: {current_price}\n"
-                            f"Period High: {high_recent}\n"
-                            f"Period Low: {low_recent}\n"
-                            f"Price Change: {price_change_pct:+.2f}%\n"
-                            f"Average Price: {avg_price:.4f}\n"
-                            f"SMA(5): {sma5:.4f}\n"
-                            f"SMA(20): {sma20:.4f}\n"
-                            f"Trend: {'Bullish (SMA5 > SMA20)' if sma5 > sma20 else 'Bearish (SMA5 < SMA20)'}\n"
-                            f"Volatility (range/avg): {volatility:.2f}%\n"
-                            f"{vol_line}"
-                            f"Recent 10 closes: {[round(c, 4) for c in closes[-10:]]}\n"
-                            f"=== END MARKET DATA ===\n\n"
-                            f"IMPORTANT: Use the REAL market data above to set realistic parameters. "
-                            f"For grid bots, set upperPrice/lowerPrice based on the actual Period High/Low and current volatility. "
-                            f"For trend bots, consider the current trend direction. "
-                            f"For DCA bots, consider the price level and change percentage."
-                        )
-                        logger.info(
-                            "[AI Bot] Fetched market data for %s/%s: price=%s, range=[%s, %s], change=%+.2f%%",
-                            detected_market, detected_symbol,
-                            current_price, low_recent, high_recent, price_change_pct,
-                        )
-                    elif detected_symbol:
-                        # Symbol was identified but no data came back. Tell
-                        # the LLM that explicitly so it can recommend a more
-                        # conservative bot type or fall back to user inputs.
-                        market_data_section = (
-                            f"\n\nNOTE: Symbol {detected_symbol} ({detected_market}) was identified "
-                            f"but no recent K-line data was available. Recommend conservative "
-                            f"defaults and tell the user to manually verify the upper/lower bounds.\n"
-                        )
-                        logger.warning(
-                            "[AI Bot] No klines returned for market=%s sym=%s; falling back to no-data prompt",
-                            detected_market, detected_symbol,
-                        )
-            except Exception as mkt_err:
-                logger.warning(f"[AI Bot] Failed to fetch market data: {mkt_err}")
-
-            # Tell the LLM which bot types are usable for this market so it
-            # doesn't recommend e.g. grid on USStock (overnight gap risk).
-            if detected_market:
-                _allowed_bots_for_market = sorted(allowed_bot_types(detected_market)) or ['grid', 'martingale', 'trend', 'dca']
-            else:
-                _allowed_bots_for_market = ['grid', 'martingale', 'trend', 'dca']
-            _market_constraint_line = (
-                f"\nIMPORTANT MARKET CONSTRAINT: The detected market is "
-                f"'{detected_market or 'Crypto'}'. Allowed bot types for this market are: "
-                f"{_allowed_bots_for_market}. Do NOT recommend a botType outside this list.\n"
-                if detected_market else ""
-            )
-            # Quote-currency hint for capital field labelling (USD for
-            # forex/stock, USDT for crypto). Pure cosmetics for the LLM's
-            # 'reason' string.
-            _quote_label = 'USD' if detected_market in ('USStock', 'Forex') else 'USDT'
-
-            system_prompt = (
-                "You are an expert quantitative trading advisor. The user wants to create an automated trading bot.\n"
-                "Based on their description AND the real-time market data provided, recommend one of the four bot types and provide optimal parameters.\n\n"
-                "Available bot types and their parameter schemas. Use these exact frontend keys:\n"
-                "1. grid - Grid Trading: {upperPrice, lowerPrice, gridCount: int(5-100), gridMode: 'arithmetic'|'geometric', "
-                "gridDirection: 'long'|'short'|'neutral', initialPositionPct: number(0-100), "
-                "boundaryAction: 'pause'|'stop_loss'|'hold', adaptiveBounds: boolean, adaptiveAtrMult: number(0.5-5), "
-                "waterfallProtection: boolean, waterfallDropPct: decimal ratio(0.005-0.20; example 0.03 means 3%)}\n"
-                "2. martingale - Martingale: {multiplier: number(1.1-3.0), maxLayers: int(2-10), "
-                "priceDropPct: number(1-20), takeProfitPct: number(0.2-50), stopLossPct: number(1-50), "
-                "direction: 'long'|'short', trailingTpEnabled: boolean, trailingTpCallbackPct: number(0.05-50), "
-                "waterfallProtection: boolean, waterfallDropPct: decimal ratio(0.005-0.20; example 0.04 means 4%)}\n"
-                "3. trend - Trend Following: {maPeriod: int(5-200), maType: 'SMA'|'EMA', confirmBars: int(1-5), "
-                "positionPct: number(10-100), direction: 'long'|'short'|'both', trailingTpEnabled: boolean, "
-                "trailingTpActivationPct: number(0.2-100), trailingTpCallbackPct: number(0.05-50)}\n"
-                "4. dca - DCA (Dollar-Cost Averaging): {frequency: 'every_bar'|'hourly'|'4h'|'daily'|'weekly'|'biweekly'|'monthly', "
-                "dipBuyEnabled: boolean, dipThreshold: number(1-30)}\n\n"
-                f"Bot type x market matrix (single source of truth from broker_market_policy): {dict(BOT_TYPE_MARKETS)}\n"
-                f"{_market_constraint_line}"
-                "Also suggest base config:\n"
-                f"- marketCategory: 'Crypto'|'USStock'|'Forex' (must match the detected market: '{detected_market or 'Crypto'}')\n"
-                f"- symbol: string (e.g. 'BTC/USDT' for Crypto, 'XAU/USD' or 'EUR/USD' for Forex, 'TSLA' for USStock)\n"
-                "- timeframe: '1m'|'5m'|'15m'|'1h'|'4h'|'1d'\n"
-                "- marketType: 'swap'|'spot' (USStock and Forex are always 'spot')\n"
-                "- leverage: int(1-125, only for swap; ignored on spot/USStock/Forex)\n"
-                f"- initialCapital: number (in {_quote_label})\n\n"
-                "Risk config:\n"
-                "- stopLossPct: number(0-100), stored as a 0-100 UI percent\n"
-                "- takeProfitPct: number(0-1000), stored as a 0-100 UI percent\n"
-                "- maxPosition: number\n\n"
-                "Percent convention: fields ending in Pct are 0-100 UI percentages, except waterfallDropPct, which is a 0-1 decimal ratio.\n"
-                "CRITICAL: If real-time market data is provided, you MUST use it to set realistic and accurate parameters.\n"
-                "For example, for grid trading, the upperPrice and lowerPrice MUST be derived from the actual price range in the market data.\n"
-                "IMPORTANT: Do NOT set initialCapital in baseConfig - leave it as 0 or omit it. The user will enter their own investment amount.\n"
-                "Also do NOT set amountPerGrid, initialAmount(for martingale), amountEach, or totalBudget(for DCA) - these will be auto-calculated from the user's capital.\n\n"
-                "Return ONLY a single JSON object with this structure:\n"
-                "{\n"
-                '  "botType": "grid"|"martingale"|"trend"|"dca",\n'
-                '  "botName": "descriptive name",\n'
-                '  "reason": "brief explanation in user\'s language, mention the market analysis",\n'
-                '  "baseConfig": {marketCategory, symbol, timeframe, marketType, leverage, initialCapital},\n'
-                '  "strategyParams": {... type-specific params ...},\n'
-                '  "riskConfig": {stopLossPct, takeProfitPct, maxPosition}\n'
-                "}\n"
-                "Do not use markdown fences. Respond with valid JSON only."
-            )
-
-            user_content = f"User request:\n{prompt.strip()}{market_data_section}"
-
-            content = llm.call_llm_api(
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_content},
-                ],
-                model=llm.get_code_generation_model(),
-                temperature=0.4,
-                use_json_mode=False
-            )
-
-            raw = (content or '').strip()
-            if raw.startswith('```'):
-                raw = re.sub(r'^```[a-zA-Z]*', '', raw).strip()
-                if raw.endswith('```'):
-                    raw = raw[:-3].strip()
-            result = None
-            try:
-                result = json.loads(raw)
-            except json.JSONDecodeError:
-                m = re.search(r'\{[\s\S]*\}', raw)
-                if m:
-                    try:
-                        result = json.loads(m.group(0))
-                    except json.JSONDecodeError:
-                        result = None
-            if not isinstance(result, dict) or 'botType' not in result:
-                return jsonify({'code': '', 'params': None, 'bot_recommend': None,
-                                'msg': 'AI did not return valid bot recommendation'})
-            valid_types = ('grid', 'martingale', 'trend', 'dca')
-            if result.get('botType') not in valid_types:
-                result['botType'] = 'grid'
-
-            # Cross-check the LLM's botType against the per-market matrix and
-            # downgrade if it picked something incompatible (e.g. 'grid' for
-            # a USStock symbol where overnight gaps blow up grid bots, or
-            # 'martingale' for Forex where margin rules differ). 'dca' is
-            # the universal safe fallback because it works on every market.
-            if detected_market:
-                _allowed_for_mkt = allowed_bot_types(detected_market)
-                if _allowed_for_mkt and result.get('botType') not in _allowed_for_mkt:
-                    fallback = 'dca' if 'dca' in _allowed_for_mkt else sorted(_allowed_for_mkt)[0]
-                    logger.info(
-                        "[AI Bot] Downgrading botType=%s -> %s for market=%s (incompatible)",
-                        result.get('botType'), fallback, detected_market,
-                    )
-                    result['botType'] = fallback
-
-            # Force baseConfig.marketCategory to the detected market so the
-            # frontend wizard's applyAiPreset lights up the correct market
-            # radio + credential filter immediately. If detection failed we
-            # leave whatever the LLM said (or default to Crypto).
-            base_cfg = result.get('baseConfig') if isinstance(result.get('baseConfig'), dict) else {}
-            if detected_market:
-                base_cfg['marketCategory'] = detected_market
-            elif not base_cfg.get('marketCategory'):
-                base_cfg['marketCategory'] = 'Crypto'
-            # USStock and Forex on QuantDinger are always spot; lock it so
-            # the LLM can't accidentally suggest 'swap' which would later
-            # fail broker_market_policy validation.
-            if base_cfg.get('marketCategory') in ('USStock', 'Forex'):
-                base_cfg['marketType'] = 'spot'
-                base_cfg['leverage'] = 1
-            # If we successfully detected the symbol from prompt, prefer the
-            # canonical form over whatever the LLM echoed back (e.g. it
-            # might say 'XAU' instead of the data-source-friendly 'XAU/USD').
-            if detected_symbol:
-                base_cfg['symbol'] = detected_symbol
-            result['baseConfig'] = base_cfg
-
-            params = result.get('strategyParams') if isinstance(result.get('strategyParams'), dict) else {}
-            risk_cfg = result.get('riskConfig') if isinstance(result.get('riskConfig'), dict) else {}
-
-            def _num(v, default, min_v=None, max_v=None):
-                try:
-                    n = float(v)
-                except (TypeError, ValueError):
-                    n = float(default)
-                if min_v is not None:
-                    n = max(float(min_v), n)
-                if max_v is not None:
-                    n = min(float(max_v), n)
-                return n
-
-            def _int(v, default, min_v=None, max_v=None):
-                return int(round(_num(v, default, min_v, max_v)))
-
-            def _bool(v, default=False):
-                if isinstance(v, bool):
-                    return v
-                if isinstance(v, str):
-                    return v.strip().lower() in ('1', 'true', 'yes', 'on')
-                return default if v is None else bool(v)
-
-            def _ratio(v, default):
-                n = _num(v, default, 0.001, 100)
-                return n / 100 if n > 1 else n
-
-            bot_type = result.get('botType')
-            market_type = base_cfg.get('marketType') or 'spot'
-            force_long = market_type == 'spot' or base_cfg.get('marketCategory') in ('USStock', 'Forex')
-
-            if bot_type == 'grid':
-                params.pop('amountPerGrid', None)
-                params.update({
-                    'upperPrice': _num(params.get('upperPrice'), 0, 0),
-                    'lowerPrice': _num(params.get('lowerPrice'), 0, 0),
-                    'gridCount': _int(params.get('gridCount'), 10, 5, 100),
-                    'gridMode': params.get('gridMode') if params.get('gridMode') in ('arithmetic', 'geometric') else 'arithmetic',
-                    'gridDirection': 'long' if force_long else (params.get('gridDirection') if params.get('gridDirection') in ('long', 'short', 'neutral') else 'neutral'),
-                    'initialPositionPct': _num(params.get('initialPositionPct'), 0, 0, 100),
-                    'boundaryAction': params.get('boundaryAction') if params.get('boundaryAction') in ('pause', 'stop_loss', 'hold') else 'pause',
-                    'adaptiveBounds': _bool(params.get('adaptiveBounds'), True),
-                    'adaptiveAtrMult': _num(params.get('adaptiveAtrMult'), 2, 0.5, 5),
-                    'waterfallProtection': _bool(params.get('waterfallProtection'), True),
-                    'waterfallDropPct': _ratio(params.get('waterfallDropPct'), 0.03),
-                })
-            elif bot_type == 'martingale':
-                params.pop('initialAmount', None)
-                params.update({
-                    'multiplier': _num(params.get('multiplier'), 2, 1.1, 3),
-                    'maxLayers': _int(params.get('maxLayers'), 5, 2, 10),
-                    'priceDropPct': _num(params.get('priceDropPct'), 3, 1, 20),
-                    'takeProfitPct': _num(params.get('takeProfitPct') or risk_cfg.get('takeProfitPct'), 2, 0.2, 50),
-                    'stopLossPct': _num(params.get('stopLossPct') or risk_cfg.get('stopLossPct'), 12, 1, 50),
-                    'direction': 'long' if force_long else (params.get('direction') if params.get('direction') in ('long', 'short') else 'long'),
-                    'trailingTpEnabled': _bool(params.get('trailingTpEnabled'), False),
-                    'trailingTpCallbackPct': _num(params.get('trailingTpCallbackPct'), 0.8, 0.05, 50),
-                    'waterfallProtection': _bool(params.get('waterfallProtection'), True),
-                    'waterfallDropPct': _ratio(params.get('waterfallDropPct'), 0.04),
-                })
-            elif bot_type == 'trend':
-                params.update({
-                    'maPeriod': _int(params.get('maPeriod'), 20, 5, 200),
-                    'maType': params.get('maType') if params.get('maType') in ('SMA', 'EMA') else 'EMA',
-                    'confirmBars': _int(params.get('confirmBars'), 2, 1, 5),
-                    'positionPct': _num(params.get('positionPct'), 50, 10, 100),
-                    'direction': 'long' if force_long else (params.get('direction') if params.get('direction') in ('long', 'short', 'both') else 'both'),
-                    'trailingTpEnabled': _bool(params.get('trailingTpEnabled'), False),
-                    'trailingTpActivationPct': _num(params.get('trailingTpActivationPct'), 5, 0.2, 100),
-                    'trailingTpCallbackPct': _num(params.get('trailingTpCallbackPct'), 1, 0.05, 50),
-                })
-            elif bot_type == 'dca':
-                params.pop('amountEach', None)
-                params.pop('totalBudget', None)
-                freq = str(params.get('frequency') or '').strip().lower()
-                allowed = {'every_bar', 'hourly', '4h', 'daily', 'weekly', 'biweekly', 'monthly'}
-                params.update({
-                    'frequency': freq if freq in allowed else 'daily',
-                    'dipBuyEnabled': _bool(params.get('dipBuyEnabled'), False),
-                    'dipThreshold': _num(params.get('dipThreshold'), 5, 1, 30),
-                })
-
-            risk_cfg['stopLossPct'] = _num(risk_cfg.get('stopLossPct'), 10, 0, 100)
-            risk_cfg['takeProfitPct'] = _num(risk_cfg.get('takeProfitPct'), 20, 0, 1000)
-            risk_cfg['maxPosition'] = _num(risk_cfg.get('maxPosition'), 0, 0)
-            result['strategyParams'] = params
-            result['riskConfig'] = risk_cfg
-
-            if result.get('botType') == 'dca':
-                params = result.get('strategyParams') if isinstance(result.get('strategyParams'), dict) else {}
-                freq = str(params.get('frequency') or '').strip().lower()
-                allowed = {'every_bar', 'hourly', '4h', 'daily', 'weekly', 'biweekly', 'monthly'}
-                if freq and freq not in allowed:
-                    params['frequency'] = 'daily'
-                    result['strategyParams'] = params
+                result = recommend_bot_strategy(llm, prompt)
+            except ValueError as exc:
+                return jsonify({'code': '', 'params': None, 'bot_recommend': None, 'msg': str(exc)})
             return jsonify({'code': '', 'params': None, 'bot_recommend': result, 'msg': 'success'})
 
         if intent == 'adjust_params':

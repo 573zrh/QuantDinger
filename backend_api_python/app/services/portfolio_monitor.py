@@ -18,6 +18,9 @@ from app.services.fast_analysis import get_fast_analysis_service
 from app.services.signal_notifier import SignalNotifier
 from app.services.kline import KlineService
 from app.services.billing_service import get_billing_service
+from app.services.portfolio_monitor_i18n import get_alert_message, get_alert_title
+from app.services.portfolio_monitor_notifications import resolve_notification_delivery
+from app.utils.json_helpers import safe_json_loads
 
 logger = get_logger(__name__)
 
@@ -26,38 +29,6 @@ DEFAULT_USER_ID = 1
 _monitor_thread: Optional[threading.Thread] = None
 _stop_event = threading.Event()
 
-ALERT_MESSAGES = {
-    'zh-CN': {
-        'price_above': '🔔 价格突破预警: {symbol} 当前价格 ${current_price:.4f} 已突破 ${threshold:.4f}',
-        'price_below': '🔔 价格跌破预警: {symbol} 当前价格 ${current_price:.4f} 已跌破 ${threshold:.4f}',
-        'pnl_above': '🎉 盈利预警: {symbol} 当前盈亏 {pnl_percent:.1f}% 已达到 {threshold:.1f}% 目标',
-        'pnl_below': '⚠️ 亏损预警: {symbol} 当前盈亏 {pnl_percent:.1f}% 已触及 {threshold:.1f}% 止损线',
-        'alert_title': '价格/盈亏预警'
-    },
-    'en-US': {
-        'price_above': '🔔 Price Alert: {symbol} current price ${current_price:.4f} has exceeded ${threshold:.4f}',
-        'price_below': '🔔 Price Alert: {symbol} current price ${current_price:.4f} has dropped below ${threshold:.4f}',
-        'pnl_above': '🎉 Profit Alert: {symbol} P&L {pnl_percent:.1f}% has reached {threshold:.1f}% target',
-        'pnl_below': '⚠️ Loss Alert: {symbol} P&L {pnl_percent:.1f}% has hit {threshold:.1f}% stop-loss',
-        'alert_title': 'Price/P&L Alert'
-    }
-}
-
-
-def _get_alert_message(alert_type: str, language: str = 'en-US', **kwargs) -> str:
-    """Get localized alert message."""
-    lang = 'zh-CN' if language and language.startswith('zh') else 'en-US'
-    templates = ALERT_MESSAGES.get(lang, ALERT_MESSAGES['en-US'])
-    template = templates.get(alert_type, '')
-    if template:
-        return template.format(**kwargs)
-    return ''
-
-
-def _get_alert_title(language: str = 'en-US') -> str:
-    """Get localized alert title."""
-    lang = 'zh-CN' if language and language.startswith('zh') else 'en-US'
-    return ALERT_MESSAGES.get(lang, ALERT_MESSAGES['en-US']).get('alert_title', 'Alert')
 
 
 def _now_ts() -> int:
@@ -123,86 +94,6 @@ def _bump_monitor_schedule(
             cur.close()
     except Exception as e:
         logger.error(f"_bump_monitor_schedule failed for monitor #{monitor_id}: {e}")
-
-
-def _resolve_notification_delivery(user_id: int, notification_config: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-    """
-    合并个人中心保存的 notification_settings 到 targets，并规范化 channels。
-    前端创建监控常只传 channels（email/telegram/webhook），不传 targets；若不合并则外发渠道全部跳过且无任何送达。
-    若当前 channels 均无法送达（无邮箱/Chat ID 等），则追加 browser 保证站内通知。
-    """
-    cfg: Dict[str, Any] = dict(notification_config) if isinstance(notification_config, dict) else {}
-    raw_ch = cfg.get('channels')
-    if isinstance(raw_ch, str):
-        raw_ch = [raw_ch]
-    elif not isinstance(raw_ch, list):
-        raw_ch = []
-    channels = [str(c).strip().lower() for c in raw_ch if c is not None and str(c).strip()]
-    if not channels:
-        channels = ['browser']
-
-    targets: Dict[str, Any] = dict(cfg.get('targets') or {})
-
-    try:
-        with get_db_connection() as db:
-            cur = db.cursor()
-            cur.execute(
-                "SELECT email, notification_settings FROM qd_users WHERE id = ?",
-                (user_id,),
-            )
-            row = cur.fetchone()
-            cur.close()
-        if not row:
-            account_email = ""
-            settings = {}
-        else:
-            account_email = (row.get("email") or "").strip()
-            settings = _safe_json_loads(row.get("notification_settings"), {})
-        if not (targets.get("email") or "").strip():
-            te = (settings.get("email") or "").strip()
-            targets["email"] = te or account_email
-        if not (targets.get("telegram") or "").strip():
-            targets["telegram"] = (settings.get("telegram_chat_id") or "").strip()
-        if not (targets.get("telegram_bot_token") or "").strip():
-            targets["telegram_bot_token"] = (settings.get("telegram_bot_token") or "").strip()
-        if not (targets.get("webhook") or "").strip():
-            targets["webhook"] = (settings.get("webhook_url") or "").strip()
-    except Exception as e:
-        logger.warning(f"_resolve_notification_delivery: load user {user_id} settings failed: {e}")
-
-    def _can_deliver(ch: str) -> bool:
-        if ch == "browser":
-            return True
-        if ch == "email":
-            return bool((targets.get("email") or "").strip())
-        if ch == "telegram":
-            return bool((targets.get("telegram") or "").strip())
-        if ch == "webhook":
-            return bool((targets.get("webhook") or "").strip())
-        return False
-
-    if not any(_can_deliver(c) for c in channels):
-        channels = list(dict.fromkeys(list(channels) + ["browser"]))
-
-    cfg["channels"] = channels
-    cfg["targets"] = targets
-    return cfg
-
-
-def _safe_json_loads(value, default=None):
-    """Safely parse JSON string."""
-    if default is None:
-        default = {}
-    if isinstance(value, dict):
-        return value
-    if isinstance(value, list):
-        return value
-    if isinstance(value, str) and value.strip():
-        try:
-            return json.loads(value)
-        except Exception:
-            return default
-    return default
 
 
 def _get_positions_for_monitor(position_ids: List[int] = None, user_id: int = None) -> List[Dict[str, Any]]:
@@ -305,7 +196,7 @@ def _analyze_single_position(pos: Dict[str, Any], language: str, user_id: int = 
         trading_plan = analysis_result.get('trading_plan', {})
         scores = analysis_result.get('scores', {})
         risks = analysis_result.get('risks', [])
-        risk_report = '\n'.join([f"• {r}" for r in risks]) if risks else ''
+        risk_report = '\n'.join([f"- {r}" for r in risks]) if risks else ''
 
         result = {
             'market': market, 'symbol': symbol, 'name': name, 'group_name': group_name,
@@ -348,7 +239,7 @@ def _run_ai_analysis(positions: List[Dict[str, Any]], config: Dict[str, Any], us
         language = config.get('language', 'en-US')
         custom_prompt = config.get('prompt', '')
 
-        # ── Deduplicate by (market, symbol) ──
+        # Deduplicate by (market, symbol) to avoid repeated LLM calls.
         unique_map: Dict[str, int] = {}          # "market|symbol" -> index in unique_positions
         unique_positions: List[Dict[str, Any]] = []
         pos_to_unique: List[int] = []             # positions[i] -> unique_positions index
@@ -378,7 +269,7 @@ def _run_ai_analysis(positions: List[Dict[str, Any]], config: Dict[str, Any], us
                         'name': pos.get('name') or pos.get('symbol'), 'error': str(e)
                     }
 
-        # ── Map back: each position gets its own copy with position-specific P&L ──
+        # Map back: each position gets its own copy with position-specific P&L.
         position_analyses: List[Dict[str, Any]] = []
         seen_keys: set = set()
         for i, pos in enumerate(positions):
@@ -478,40 +369,40 @@ def _build_html_report(
     
     is_zh = language.startswith('zh')
     
-    # Text translations
+    # Text labels for the HTML report.
     texts = {
-        'title': '投资组合AI分析报告' if is_zh else 'Portfolio AI Analysis Report',
-        'subtitle': '由 QuantDinger AI 快速分析引擎生成' if is_zh else 'Generated by QuantDinger Fast AI Analysis Engine',
-        'overview': '组合概览' if is_zh else 'Portfolio Overview',
-        'positions': '持仓数量' if is_zh else 'Positions',
-        'total_value': '总市值' if is_zh else 'Total Value',
-        'total_cost': '总成本' if is_zh else 'Total Cost',
-        'total_pnl': '总盈亏' if is_zh else 'Total P&L',
-        'ai_recommendations': '🤖 AI智能分析建议' if is_zh else '🤖 AI Recommendations',
-        'buy': '买入' if is_zh else 'Buy',
-        'sell': '卖出' if is_zh else 'Sell',
-        'hold': '持有' if is_zh else 'Hold',
-        'position_analysis': '📈 各持仓详细分析' if is_zh else '📈 Position Analysis',
-        'current_price': '当前价格' if is_zh else 'Current',
-        'entry_price': '买入价' if is_zh else 'Entry',
-        'pnl': '盈亏' if is_zh else 'P&L',
-        'quantity': '数量' if is_zh else 'Qty',
-        'side': '方向' if is_zh else 'Side',
-        'long': '做多' if is_zh else 'Long',
-        'short': '做空' if is_zh else 'Short',
-        'ai_decision': 'AI决策' if is_zh else 'AI Decision',
-        'confidence': '置信度' if is_zh else 'Confidence',
-        'reasoning': '分析摘要' if is_zh else 'Summary',
-        'trader_report': '📋 交易员详细评估' if is_zh else '📋 Trader Analysis',
-        'risk_report': '⚠️ 风险评估' if is_zh else '⚠️ Risk Assessment',
-        'overview_report': '📊 市场概览' if is_zh else '📊 Market Overview',
-        'click_expand': '点击展开详情' if is_zh else 'Click to expand',
-        'user_focus': '👤 用户关注点' if is_zh else '👤 User Focus',
-        'generated_at': '报告生成时间' if is_zh else 'Generated at',
-        'disclaimer': '本报告仅供参考，不构成投资建议。' if is_zh else 'For reference only. Not investment advice.',
-        'analysis_failed': '分析失败' if is_zh else 'Analysis failed'
+        'title': 'Portfolio AI Analysis Report',
+        'subtitle': 'Generated by QuantDinger Fast AI Analysis Engine',
+        'overview': 'Portfolio Overview',
+        'positions': 'Positions',
+        'total_value': 'Total Value',
+        'total_cost': 'Total Cost',
+        'total_pnl': 'Total P&L',
+        'ai_recommendations': 'AI Recommendations',
+        'buy': 'Buy',
+        'sell': 'Sell',
+        'hold': 'Hold',
+        'position_analysis': 'Position Analysis',
+        'current_price': 'Current',
+        'entry_price': 'Entry',
+        'pnl': 'P&L',
+        'quantity': 'Qty',
+        'side': 'Side',
+        'long': 'Long',
+        'short': 'Short',
+        'ai_decision': 'AI Decision',
+        'confidence': 'Confidence',
+        'reasoning': 'Summary',
+        'trader_report': 'Trader Analysis',
+        'risk_report': 'Risk Assessment',
+        'overview_report': 'Market Overview',
+        'click_expand': 'Click to expand',
+        'user_focus': 'User Focus',
+        'generated_at': 'Generated at',
+        'disclaimer': 'For research reference only. Not investment advice.',
+        'analysis_failed': 'Analysis failed',
     }
-    
+
     # CSS Styles
     css = '''
     <style>
@@ -630,17 +521,17 @@ def _build_html_report(
                 <h2 class="qd-section-title">{texts['ai_recommendations']}</h2>
                 <div class="qd-rec-grid">
                     <div class="qd-rec-card buy">
-                        <div class="emoji">🟢</div>
+                        <div class="emoji">BUY</div>
                         <div class="count">{buy_count}</div>
                         <div class="label">{texts['buy']}</div>
                     </div>
                     <div class="qd-rec-card sell">
-                        <div class="emoji">🔴</div>
+                        <div class="emoji">SELL</div>
                         <div class="count">{sell_count}</div>
                         <div class="label">{texts['sell']}</div>
                     </div>
                     <div class="qd-rec-card hold">
-                        <div class="emoji">🟡</div>
+                        <div class="emoji">HOLD</div>
                         <div class="count">{hold_count}</div>
                         <div class="label">{texts['hold']}</div>
                     </div>
@@ -663,7 +554,7 @@ def _build_html_report(
                 <div class="qd-position">
                     <div class="qd-pos-header">
                         <div class="qd-pos-symbol">
-                            <div class="icon hold">⚠️</div>
+                            <div class="icon hold">!</div>
                             <div>
                                 <div class="name">{name}</div>
                                 <div class="market">{market}/{symbol}</div>
@@ -751,7 +642,7 @@ def _build_html_report(
                         <input type="checkbox" id="{trader_id}">
                         <label for="{trader_id}" class="qd-collapsible-header">
                             <span class="title">{texts['trader_report']}</span>
-                            <span class="arrow">▼</span>
+                            <span class="arrow">-&gt;</span>
                         </label>
                         <div class="qd-collapsible-content">{trader_reasoning.replace(chr(10), '<br>')}</div>
                     </div>
@@ -765,7 +656,7 @@ def _build_html_report(
                         <input type="checkbox" id="{overview_id}">
                         <label for="{overview_id}" class="qd-collapsible-header">
                             <span class="title">{texts['overview_report']}</span>
-                            <span class="arrow">▼</span>
+                            <span class="arrow">-&gt;</span>
                         </label>
                         <div class="qd-collapsible-content">{overview_report.replace(chr(10), '<br>')}</div>
                     </div>
@@ -779,7 +670,7 @@ def _build_html_report(
                         <input type="checkbox" id="{risk_id}">
                         <label for="{risk_id}" class="qd-collapsible-header">
                             <span class="title">{texts['risk_report']}</span>
-                            <span class="arrow">▼</span>
+                            <span class="arrow">-&gt;</span>
                         </label>
                         <div class="qd-collapsible-content">{risk_report.replace(chr(10), '<br>')}</div>
                     </div>
@@ -818,17 +709,13 @@ def _build_telegram_report(
     language: str,
     custom_prompt: str = ''
 ) -> str:
-    """Build a concise report suitable for Telegram (HTML format).
+    """Build a concise Telegram-friendly report in HTML text."""
 
-    Positions with quantity>0 and entry_price>0 are shown with P&L;
-    others are treated as watchlist items and only show current price.
-    """
-
-    def _has_holding(pa: Dict[str, Any]) -> bool:
+    def has_holding(pa: Dict[str, Any]) -> bool:
         return float(pa.get('quantity') or 0) > 0 and float(pa.get('entry_price') or 0) > 0
 
-    held = [p for p in position_analyses if _has_holding(p) and not p.get('error')]
-    watched = [p for p in position_analyses if not _has_holding(p) and not p.get('error')]
+    held = [p for p in position_analyses if has_holding(p) and not p.get('error')]
+    watched = [p for p in position_analyses if not has_holding(p) and not p.get('error')]
     errored = [p for p in position_analyses if p.get('error')]
 
     total_cost = sum(float(p.get('entry_price', 0)) * float(p.get('quantity', 0)) for p in held)
@@ -840,93 +727,49 @@ def _build_telegram_report(
     sell_count = len([p for p in position_analyses if p.get('final_decision') == 'SELL'])
     hold_count = len([p for p in position_analyses if p.get('final_decision') == 'HOLD'])
 
-    is_zh = language.startswith('zh')
-
-    # ── Header / Overview ──
-    if is_zh:
-        lines: List[str] = ["<b>📊 AI资产分析报告</b>", ""]
-        overview = ["<b>📈 概览</b>"]
-        if held:
-            overview.append(f"• 持仓: {len(held)} 个")
-            overview.append(f"• 总成本: ${total_cost:,.2f}")
-            overview.append(f"• 总盈亏: {pnl_sign}${total_pnl:,.2f} ({pnl_sign}{total_pnl_pct:.1f}%)")
-        if watched:
-            overview.append(f"• 观察: {len(watched)} 个")
-        lines.extend(overview)
-        lines.extend([
-            "",
-            "<b>🤖 AI建议汇总</b>",
-            f"🟢 买入: {buy_count} | 🔴 卖出: {sell_count} | 🟡 持有: {hold_count}",
-        ])
-    else:
-        lines = ["<b>📊 AI Asset Analysis Report</b>", ""]
-        overview = ["<b>📈 Overview</b>"]
-        if held:
-            overview.append(f"• Holdings: {len(held)}")
-            overview.append(f"• Total Cost: ${total_cost:,.2f}")
-            overview.append(f"• Total P&L: {pnl_sign}${total_pnl:,.2f} ({pnl_sign}{total_pnl_pct:.1f}%)")
-        if watched:
-            overview.append(f"• Watchlist: {len(watched)}")
-        lines.extend(overview)
-        lines.extend([
-            "",
-            "<b>🤖 AI Recommendations</b>",
-            f"🟢 Buy: {buy_count} | 🔴 Sell: {sell_count} | 🟡 Hold: {hold_count}",
-        ])
-
-    # ── Helper: render one analysis entry ──
-    def _render_pa(pa: Dict[str, Any], show_pnl: bool) -> None:
-        decision = pa.get('final_decision', 'HOLD')
-        emoji = {'BUY': '🟢', 'SELL': '🔴', 'HOLD': '🟡'}.get(decision, '⚪')
-        d_text = decision
-        if is_zh:
-            d_text = {'BUY': '买入', 'SELL': '卖出', 'HOLD': '持有'}.get(decision, '持有')
-        lines.append(f"\n{emoji} <b>{pa.get('name', pa.get('symbol'))}</b> ({pa.get('market')}/{pa.get('symbol')})")
-        if show_pnl:
-            pnl = pa.get('pnl', 0)
-            pnl_pct = pa.get('pnl_percent', 0)
-            ps = '+' if pnl >= 0 else ''
-            lines.append(
-                f"   💰 ${pa.get('current_price', 0):,.2f} | "
-                f"{'盈亏' if is_zh else 'P&L'}: {ps}${pnl:,.2f} ({ps}{pnl_pct:.1f}%)"
-            )
-        else:
-            lines.append(f"   💰 {'现价' if is_zh else 'Price'}: ${pa.get('current_price', 0):,.2f}")
-        lines.append(
-            f"   🎯 {'建议' if is_zh else 'Rec'}: <b>{d_text}</b> "
-            f"({'置信度' if is_zh else 'Conf'}: {pa.get('confidence', 50)}%)"
-        )
-        reasoning = pa.get('reasoning', '')
-        if reasoning:
-            lines.append(f"   📝 {reasoning[:150]}{'...' if len(reasoning) > 150 else ''}")
-
-    # ── Holdings section ──
+    lines: List[str] = ["<b>AI Asset Analysis Report</b>", ""]
+    overview = ["<b>Overview</b>"]
     if held:
-        lines.extend(["", f"<b>📋 {'持仓分析' if is_zh else 'Holdings'}</b>"])
-        for pa in held:
-            _render_pa(pa, show_pnl=True)
-
-    # ── Watchlist section ──
+        overview.append(f"Holdings: {len(held)}")
+        overview.append(f"Total Cost: ${total_cost:,.2f}")
+        overview.append(f"Total P&L: {pnl_sign}${total_pnl:,.2f} ({pnl_sign}{total_pnl_pct:.1f}%)")
     if watched:
-        lines.extend(["", f"<b>👁 {'观察列表' if is_zh else 'Watchlist'}</b>"])
-        for pa in watched:
-            _render_pa(pa, show_pnl=False)
+        overview.append(f"Watchlist: {len(watched)}")
+    lines.extend(overview)
+    lines.extend(["", "<b>AI Recommendations</b>", f"Buy {buy_count} | Sell {sell_count} | Hold {hold_count}"])
 
-    # ── Errors ──
-    for pa in errored:
-        label = pa.get('name') or pa.get('symbol') or '?'
-        lines.append(f"\n⚠️ <b>{label}</b>: {'分析失败' if is_zh else 'Analysis failed'}")
+    def render_analysis(pa: Dict[str, Any], show_pnl: bool) -> None:
+        decision = str(pa.get('final_decision') or 'HOLD').upper()
+        name = pa.get('name') or pa.get('symbol') or '-'
+        lines.append(f"\n<b>{name}</b> ({pa.get('market')}/{pa.get('symbol')})")
+        if show_pnl:
+            pnl = float(pa.get('pnl') or 0)
+            pnl_pct = float(pa.get('pnl_percent') or 0)
+            sign = '+' if pnl >= 0 else ''
+            lines.append(f"Current: ${float(pa.get('current_price') or 0):,.2f} | P&L: {sign}${pnl:,.2f} ({sign}{pnl_pct:.1f}%)")
+        else:
+            lines.append(f"Price: ${float(pa.get('current_price') or 0):,.2f}")
+        lines.append(f"Rec: <b>{decision}</b> (Conf: {pa.get('confidence', 50)}%)")
+        reasoning = str(pa.get('reasoning') or '').strip()
+        if reasoning:
+            lines.append(reasoning[:150] + ('...' if len(reasoning) > 150 else ''))
+
+    if held:
+        lines.extend(["", "<b>Holdings</b>"])
+        for analysis in held:
+            render_analysis(analysis, show_pnl=True)
+    if watched:
+        lines.extend(["", "<b>Watchlist</b>"])
+        for analysis in watched:
+            render_analysis(analysis, show_pnl=False)
+    for analysis in errored:
+        label = analysis.get('name') or analysis.get('symbol') or '-'
+        lines.append(f"\n<b>{label}</b>: Analysis failed")
 
     if custom_prompt:
-        lines.extend(["", f"<b>👤 {'关注点' if is_zh else 'Focus'}:</b> {custom_prompt}"])
+        lines.extend(["", f"<b>Focus:</b> {custom_prompt}"])
 
-    lines.extend([
-        "",
-        "─────────────────────",
-        f"<i>⏰ {time.strftime('%Y-%m-%d %H:%M')}</i>",
-        f"<i>{'由 QuantDinger 多智能体系统生成' if is_zh else 'Generated by QuantDinger Multi-Agent System'}</i>",
-    ])
-
+    lines.extend(["", "----", f"<i>{time.strftime('%Y-%m-%d %H:%M')}</i>"])
     return '\n'.join(lines)
 
 
@@ -934,107 +777,41 @@ def _build_batch_telegram_report(
     monitor_results: List[Dict[str, Any]],
     language: str,
 ) -> str:
-    """Build a single Telegram report that combines multiple monitor results."""
-    is_zh = language.startswith('zh')
-
-    def _has_holding(pa: Dict[str, Any]) -> bool:
-        return float(pa.get('quantity') or 0) > 0 and float(pa.get('entry_price') or 0) > 0
-
+    """Build one Telegram report that combines multiple monitor results."""
     all_analyses: List[Dict[str, Any]] = []
-    monitor_sections: List[str] = []
+    section_lines: List[str] = []
 
-    for res in monitor_results:
-        meta = res.get('_meta', {})
-        m_name = meta.get('monitor_name', '?')
-        m_analyses = meta.get('position_analyses', [])
-        all_analyses.extend(m_analyses)
-
-        section_lines: List[str] = [f"\n<b>📋 {m_name}</b>"]
-        for pa in m_analyses:
-            if pa.get('error'):
-                label = pa.get('name') or pa.get('symbol') or '?'
-                section_lines.append(f"  ⚠️ {label}: {'分析失败' if is_zh else 'Failed'}")
+    for result in monitor_results:
+        monitor = result.get('monitor') or {}
+        name = monitor.get('name') or monitor.get('symbol') or 'Monitor'
+        analyses = result.get('position_analyses') or []
+        all_analyses.extend([a for a in analyses if isinstance(a, dict)])
+        section_lines.append(f"\n<b>{name}</b>")
+        if result.get('error'):
+            section_lines.append(f"Failed: {result.get('error')}")
+            continue
+        for analysis in analyses:
+            if analysis.get('error'):
                 continue
-            decision = pa.get('final_decision', 'HOLD')
-            emoji = {'BUY': '🟢', 'SELL': '🔴', 'HOLD': '🟡'}.get(decision, '⚪')
-            d_text = ({'BUY': '买入', 'SELL': '卖出', 'HOLD': '持有'}.get(decision, '持有')) if is_zh else decision
-            cur_price = pa.get('current_price', 0)
-            section_lines.append(
-                f"{emoji} <b>{pa.get('name', pa.get('symbol'))}</b> ({pa.get('market')}/{pa.get('symbol')})"
-            )
-            if _has_holding(pa):
-                pnl = pa.get('pnl', 0)
-                pnl_s = '+' if pnl >= 0 else ''
-                pnl_pct = pa.get('pnl_percent', 0)
-                section_lines.append(
-                    f"   💰 ${cur_price:,.2f} | {'盈亏' if is_zh else 'P&L'}: {pnl_s}${pnl:,.2f} ({pnl_s}{pnl_pct:.1f}%)"
-                )
-            else:
-                section_lines.append(f"   💰 {'现价' if is_zh else 'Price'}: ${cur_price:,.2f}")
-            section_lines.append(
-                f"   🎯 {'建议' if is_zh else 'Rec'}: <b>{d_text}</b> "
-                f"({'置信度' if is_zh else 'Conf'}: {pa.get('confidence', 50)}%)"
-            )
-            reasoning = pa.get('reasoning', '')
-            if reasoning:
-                section_lines.append(f"   📝 {reasoning[:120]}{'...' if len(reasoning) > 120 else ''}")
-        monitor_sections.append('\n'.join(section_lines))
+            decision = str(analysis.get('final_decision') or 'HOLD').upper()
+            label = analysis.get('name') or analysis.get('symbol') or '-'
+            price = float(analysis.get('current_price') or 0)
+            section_lines.append(f"{label}: {decision}, ${price:,.2f}, conf {analysis.get('confidence', 50)}%")
 
-    held = [a for a in all_analyses if _has_holding(a) and not a.get('error')]
-    watched = [a for a in all_analyses if not _has_holding(a) and not a.get('error')]
-    total_cost = sum(float(a.get('entry_price', 0)) * float(a.get('quantity', 0)) for a in held)
-    total_pnl = sum(float(a.get('pnl', 0)) for a in held)
-    total_pnl_pct = round(total_pnl / total_cost * 100, 2) if total_cost else 0
-    pnl_sign = '+' if total_pnl >= 0 else ''
-    buy_c = len([a for a in all_analyses if a.get('final_decision') == 'BUY'])
-    sell_c = len([a for a in all_analyses if a.get('final_decision') == 'SELL'])
-    hold_c = len([a for a in all_analyses if a.get('final_decision') == 'HOLD'])
+    buy_count = len([p for p in all_analyses if p.get('final_decision') == 'BUY'])
+    sell_count = len([p for p in all_analyses if p.get('final_decision') == 'SELL'])
+    hold_count = len([p for p in all_analyses if p.get('final_decision') == 'HOLD'])
 
-    if is_zh:
-        header = [
-            "<b>📊 定时资产监测报告</b>",
-            "",
-            "<b>📈 综合概览</b>",
-            f"• 监控任务: {len(monitor_results)} 个",
-            f"• 标的数量: {len(all_analyses)} 个",
-        ]
-        if held:
-            header.append(f"• 持仓: {len(held)} 个 | 总成本: ${total_cost:,.2f} | 盈亏: {pnl_sign}${total_pnl:,.2f} ({pnl_sign}{total_pnl_pct:.1f}%)")
-        if watched:
-            header.append(f"• 观察: {len(watched)} 个")
-        header.extend([
-            "",
-            "<b>🤖 AI建议汇总</b>",
-            f"🟢 买入: {buy_c} | 🔴 卖出: {sell_c} | 🟡 持有: {hold_c}",
-        ])
-    else:
-        header = [
-            "<b>📊 Scheduled Portfolio Report</b>",
-            "",
-            "<b>📈 Summary</b>",
-            f"• Monitors: {len(monitor_results)}",
-            f"• Symbols: {len(all_analyses)}",
-        ]
-        if held:
-            header.append(f"• Holdings: {len(held)} | Cost: ${total_cost:,.2f} | P&L: {pnl_sign}${total_pnl:,.2f} ({pnl_sign}{total_pnl_pct:.1f}%)")
-        if watched:
-            header.append(f"• Watchlist: {len(watched)}")
-        header.extend([
-            "",
-            "<b>🤖 AI Recommendations</b>",
-            f"🟢 Buy: {buy_c} | 🔴 Sell: {sell_c} | 🟡 Hold: {hold_c}",
-        ])
-
-    footer = [
+    header = [
+        "<b>Scheduled Portfolio Report</b>",
         "",
-        "─────────────────────",
-        f"<i>⏰ {time.strftime('%Y-%m-%d %H:%M')}</i>",
-        f"<i>{'由 QuantDinger 多智能体系统生成' if is_zh else 'Generated by QuantDinger Multi-Agent System'}</i>",
+        f"Monitors: {len(monitor_results)}",
+        f"Symbols: {len(all_analyses)}",
+        f"AI Recommendations: Buy {buy_count} | Sell {sell_count} | Hold {hold_count}",
     ]
-
-    return '\n'.join(header + monitor_sections + footer)
-
-
+    header.extend(section_lines)
+    header.extend(["", "----", f"<i>{time.strftime('%Y-%m-%d %H:%M')}</i>"])
+    return '\n'.join(header)
 def _build_batch_html_report(
     monitor_results: List[Dict[str, Any]],
     language: str,
@@ -1097,13 +874,13 @@ def _send_batch_notification(
         all_channels = {'browser'}
 
     merged_nc = {'channels': list(all_channels), 'targets': {}}
-    resolved_nc = _resolve_notification_delivery(user_id, merged_nc)
+    resolved_nc = resolve_notification_delivery(user_id, merged_nc)
     channels = resolved_nc.get('channels') or ['browser']
     targets = resolved_nc.get('targets', {})
 
     is_zh = language.startswith('zh')
     names = ', '.join(r.get('_meta', {}).get('monitor_name', '?') for r in successful)
-    title = f"📊 定时资产监测: {names}" if is_zh else f"📊 Scheduled Report: {names}"
+    title = f"Scheduled Report: {names}"
     if len(title) > 255:
         title = title[:252] + '...'
 
@@ -1172,20 +949,20 @@ def _send_monitor_notification(
     try:
         notifier = SignalNotifier()
         effective_user_id = user_id if user_id is not None else DEFAULT_USER_ID
-        notification_config = _resolve_notification_delivery(effective_user_id, notification_config)
+        notification_config = resolve_notification_delivery(effective_user_id, notification_config)
 
         channels = notification_config.get('channels') or ['browser']
         targets = notification_config.get('targets', {})
 
-        title = f"📊 资产监测: {monitor_name}" if language.startswith('zh') else f"📊 Portfolio Monitor: {monitor_name}"
+        title = f"Portfolio Monitor: {monitor_name}"
         if len(title) > 255:
             title = title[:252] + '...'
         
         if not result.get('success'):
-            error_title = f"⚠️ 资产监测失败: {monitor_name}" if language.startswith('zh') else f"⚠️ Monitor Failed: {monitor_name}"
+            error_title = f"Monitor Failed: {monitor_name}"
             if len(error_title) > 255:
                 error_title = error_title[:252] + '...'
-            error_msg = f"分析失败: {result.get('error', 'Unknown error')}" if language.startswith('zh') else f"Analysis failed: {result.get('error', 'Unknown error')}"
+            error_msg = f"Analysis failed: {result.get('error', 'Unknown error')}"
             
             for channel in channels:
                 try:
@@ -1330,10 +1107,10 @@ def run_single_monitor(
 
         monitor_user_id = int(row.get('user_id') or effective_user_id)
         name = row.get('name') or f'Monitor #{monitor_id}'
-        position_ids = _safe_json_loads(row.get('position_ids'), [])
+        position_ids = safe_json_loads(row.get('position_ids'), [])
         monitor_type = row.get('monitor_type') or 'ai'
-        config = _safe_json_loads(row.get('config'), {})
-        notification_config = _safe_json_loads(row.get('notification_config'), {})
+        config = safe_json_loads(row.get('config'), {})
+        notification_config = safe_json_loads(row.get('notification_config'), {})
 
         if override_language:
             config['language'] = override_language
@@ -1350,7 +1127,7 @@ def run_single_monitor(
             target_sym = config['symbol'].strip().upper()
             target_mkt = (config.get('market') or '').strip()
 
-            # Rule 4: symbol deleted from watchlist → skip
+            # Rule 4: symbol deleted from watchlist, skip.
             still_in_watchlist = False
             try:
                 with get_db_connection() as db:
@@ -1398,7 +1175,7 @@ def run_single_monitor(
                     'pnl_percent': 0,
                 }]
         else:
-            # Rule 5: no position_ids, no config.symbol → nothing to analyze
+            # Rule 5: no position_ids and no config.symbol; nothing to analyze.
             positions = []
 
         if not positions:
@@ -1412,7 +1189,7 @@ def run_single_monitor(
             _bump_monitor_schedule(monitor_id, interval_minutes, skip_result, skipped=True)
             return skip_result
 
-        # ── Billing ──
+        # Billing check before running monitor analysis.
         billing = get_billing_service()
         symbol_count = len(positions)
         per_symbol_cost = billing.get_feature_cost('ai_analysis')
@@ -1525,7 +1302,7 @@ def _check_position_alerts():
                 is_triggered = bool(alert.get('is_triggered'))
                 last_triggered_at = alert.get('last_triggered_at')  # datetime or None
                 repeat_interval = int(alert.get('repeat_interval') or 0)
-                notification_config = _safe_json_loads(alert.get('notification_config'), {})
+                notification_config = safe_json_loads(alert.get('notification_config'), {})
                 
                 # Check if we can trigger (not triggered yet, or repeat interval passed)
                 can_trigger = not is_triggered
@@ -1560,7 +1337,7 @@ def _check_position_alerts():
                 if alert_type == 'price_above':
                     if current_price >= threshold:
                         triggered = True
-                        alert_message = _get_alert_message(
+                        alert_message = get_alert_message(
                             'price_above', alert_language,
                             symbol=symbol, current_price=current_price, threshold=threshold
                         )
@@ -1568,7 +1345,7 @@ def _check_position_alerts():
                 elif alert_type == 'price_below':
                     if current_price <= threshold:
                         triggered = True
-                        alert_message = _get_alert_message(
+                        alert_message = get_alert_message(
                             'price_below', alert_language,
                             symbol=symbol, current_price=current_price, threshold=threshold
                         )
@@ -1587,13 +1364,13 @@ def _check_position_alerts():
                         
                         if alert_type == 'pnl_above' and pnl_percent >= threshold:
                             triggered = True
-                            alert_message = _get_alert_message(
+                            alert_message = get_alert_message(
                                 'pnl_above', alert_language,
                                 symbol=symbol, pnl_percent=pnl_percent, threshold=threshold
                             )
                         elif alert_type == 'pnl_below' and pnl_percent <= threshold:
                             triggered = True
-                            alert_message = _get_alert_message(
+                            alert_message = get_alert_message(
                                 'pnl_below', alert_language,
                                 symbol=symbol, pnl_percent=pnl_percent, threshold=threshold
                             )
@@ -1615,10 +1392,10 @@ def _check_position_alerts():
                         db.commit()
                         cur.close()
                     
-                    resolved = _resolve_notification_delivery(alert_user_id, notification_config)
+                    resolved = resolve_notification_delivery(alert_user_id, notification_config)
                     channels = resolved.get('channels') or ['browser']
                     targets = resolved.get('targets', {})
-                    alert_title = _get_alert_title(alert_language)
+                    alert_title = get_alert_title(alert_language)
                     
                     for channel in channels:
                         try:
@@ -1708,16 +1485,14 @@ def notify_strategy_signal_for_positions(market: str, symbol: str, signal_type: 
             quantity = float(pos.get('quantity') or 0)
             entry_price = float(pos.get('entry_price') or 0)
             
-            title = f"🔗 策略信号联动: {pos_name}"
-            message = f"""策略发出 {signal_type} 信号!
-
-标的: {market}/{symbol}
-您的持仓: {pos_side.upper()} {quantity} @ {entry_price:.4f}
-
-信号详情:
-{signal_detail}
-
-请注意检查您的持仓是否需要调整。"""
+            title = f"Strategy Signal: {pos_name}"
+            message = (
+                f"Strategy signal: {signal_type}\n\n"
+                f"Symbol: {market}/{symbol}\n"
+                f"Position: {pos_side.upper()} {quantity} @ {entry_price:.4f}\n\n"
+                f"Signal detail:\n{signal_detail}\n\n"
+                "This notification is generated from a strategy signal linked to the position."
+            )
             
             # Save browser notification
             with get_db_connection() as db:

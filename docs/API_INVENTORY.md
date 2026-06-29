@@ -1,4 +1,4 @@
-# QuantDinger API Inventory
+﻿# QuantDinger API Inventory
 
 This inventory is a static snapshot extracted from Flask route decorators on the
 4.0 branch. It is a refactor guide, not a replacement for generated OpenAPI.
@@ -29,7 +29,6 @@ This inventory is a static snapshot extracted from Flask route decorators on the
 | `app/routes/community.py` | 18 | indicator marketplace and admin review | medium |
 | `app/routes/portfolio.py` | 16 | positions, monitors, alerts, groups | medium |
 | `app/routes/auth.py` | 13 | login/register/reset/OAuth/session info | high |
-| `app/routes/mt5.py` | 11 | MT5 connection/account/order/quote | medium |
 | `app/routes/market.py` | 10 | market config, symbols, watchlist, prices | medium |
 | `app/routes/alpaca.py` | 9 | Alpaca connection/account/order/quote | medium |
 | `app/routes/ibkr.py` | 9 | IBKR connection/account/order/quote | medium |
@@ -127,3 +126,4 @@ idempotency helpers. They are a separate integration contract from the browser U
 3. Compare frontend `src/api/*` calls against backend paths.
 4. Mark each endpoint with visibility: public, private, admin, agent, internal.
 5. Add schema coverage to high-risk mutation endpoints.
+

@@ -142,6 +142,7 @@ function Collect-Settings {
     }
 
     $script:FrontendPort = Read-Value "Frontend port" ((Get-EnvValue $RootEnv "FRONTEND_PORT") -replace '^$', '8888')
+    $script:MobilePort = Read-Value "Mobile H5 port" ((Get-EnvValue $RootEnv "MOBILE_PORT") -replace '^$', '8889')
     $script:BackendPort = Read-Value "Backend bind address" ((Get-EnvValue $RootEnv "BACKEND_PORT") -replace '^$', '127.0.0.1:5000')
 
     $existingPgPassword = Get-EnvValue $RootEnv "POSTGRES_PASSWORD"
@@ -174,9 +175,10 @@ function Write-Settings {
     Set-EnvValue $BackendEnv "ADMIN_USER" $AdminUser
     Set-EnvValue $BackendEnv "ADMIN_PASSWORD" $AdminPassword
     Set-EnvValue $BackendEnv "ADMIN_EMAIL" $AdminEmail
-    Set-EnvValue $BackendEnv "FRONTEND_URL" "http://localhost:$FrontendPort"
+    Set-EnvValue $BackendEnv "FRONTEND_URL" "http://localhost:$FrontendPort,http://localhost:$MobilePort"
 
     Set-EnvValue $RootEnv "FRONTEND_PORT" $FrontendPort
+    Set-EnvValue $RootEnv "MOBILE_PORT" $MobilePort
     Set-EnvValue $RootEnv "BACKEND_PORT" $BackendPort
     Set-EnvValue $RootEnv "POSTGRES_PASSWORD" $PostgresPassword
     Set-EnvValue $RootEnv "IMAGE_PREFIX" $ImagePrefix
@@ -214,6 +216,7 @@ function Print-Summary {
     Write-Host "QuantDinger is ready." -ForegroundColor Green
     Write-Host ""
     Write-Host "Web UI:      http://localhost:$FrontendPort"
+    Write-Host "Mobile H5:   http://localhost:$MobilePort"
     Write-Host "API:         http://127.0.0.1:$apiPort"
     Write-Host "Directory:   $InstallDir"
     Write-Host "Username:    $AdminUser"

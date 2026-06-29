@@ -18,18 +18,17 @@ notification_config = {
 from __future__ import annotations
 
 import base64
-import html
-import hmac
 import hashlib
+import hmac
+import html
 import json
 import os
 import smtplib
 import time
-import urllib.parse
 from datetime import datetime, timezone
 from email.message import EmailMessage
 from typing import Any, Dict, List, Optional, Tuple
-
+from urllib.parse import quote_plus, urlsplit, urlunsplit
 from zoneinfo import ZoneInfo
 
 import requests
@@ -41,236 +40,92 @@ from app.utils.notification_display import with_display
 logger = get_logger(__name__)
 
 
-# ============================================================
-# Webhook dialect detection & payload adaptation
-# ============================================================
-#
-# QuantDinger's webhook channel was originally generic: it POSTed our
-# own JSON schema (event/strategy/instrument/signal/order/...) to whatever
-# URL the user supplied. That works fine for self-hosted automation
-# endpoints, but most users actually point this at a group-chat bot —
-# Feishu/Lark, DingTalk, WeCom, Slack. Those bots reject any envelope
-# that isn't theirs and (worse for Feishu/DingTalk/WeCom) typically
-# return HTTP 200 with an error body, making the failure silent: the
-# user clicks "Test", sees a success toast, and nothing arrives in the
-# group.
-#
-# The helpers below auto-detect the dialect from the URL host and
-# translate our payload into the vendor's required schema. For
-# generic/self-hosted URLs we keep emitting the original schema so
-# existing integrations keep working untouched.
+def _shorten(value: Any, max_len: int = 200) -> str:
+    text = str(value or "")
+    return text if len(text) <= max_len else text[: max(0, max_len - 3)] + "..."
 
-_WEBHOOK_DIALECT_PATTERNS: Tuple[Tuple[str, Tuple[str, ...]], ...] = (
-    ('feishu', (
-        'open.feishu.cn/open-apis/bot/v2/hook/',
-        'open.larksuite.com/open-apis/bot/v2/hook/',
-        'open.larkoffice.com/open-apis/bot/v2/hook/',
-        'www.larksuite.com/open-apis/bot/v2/hook/',
-    )),
-    ('dingtalk', ('oapi.dingtalk.com/robot/send',)),
-    ('wecom', ('qyapi.weixin.qq.com/cgi-bin/webhook/send',)),
-    ('slack', ('hooks.slack.com/services/',)),
-)
+
+def _fmt_float(value: Any, max_decimals: int = 8) -> str:
+    try:
+        num = float(value or 0)
+    except Exception:
+        return "0"
+    if not num:
+        return "0"
+    text = f"{num:.{max(0, int(max_decimals))}f}".rstrip("0").rstrip(".")
+    return text or "0"
+
+
+def _payload_text(payload: Dict[str, Any]) -> str:
+    display = (payload or {}).get("display") or {}
+    if isinstance(display, dict):
+        for key in ("plain", "message", "title"):
+            value = display.get(key)
+            if value:
+                return str(value)
+    for key in ("plain", "message", "title", "event"):
+        value = (payload or {}).get(key)
+        if value:
+            return str(value)
+    return json.dumps(payload or {}, ensure_ascii=False, default=str)
 
 
 def _detect_webhook_dialect(url: str) -> str:
-    """
-    Sniff the URL and return the vendor dialect name, or 'generic' for
-    self-hosted endpoints. Keep the prefix check substring-based so
-    minor URL variations (regional subdomains, query suffixes) still
-    match.
-    """
-    u = (url or '').lower()
-    for dialect, prefixes in _WEBHOOK_DIALECT_PATTERNS:
-        if any(p in u for p in prefixes):
-            return dialect
-    return 'generic'
-
-
-def _shorten(s: str, limit: int = 4000) -> str:
-    s = str(s or '')
-    return s if len(s) <= limit else (s[:limit] + '…')
-
-
-def _build_webhook_text(payload: Dict[str, Any]) -> Tuple[str, str]:
-    """
-    Distill our internal payload into (title, body) plain text suitable
-    for forwarding to a group-chat bot. We deliberately do NOT trust
-    the bot to render arbitrary HTML — Feishu accepts markdown only in
-    "post"/"interactive" envelopes, not in "text". Markdown bullets are
-    kept lightweight (newline-separated key/value pairs) so they look
-    OK in every vendor that supports text or markdown.
-    """
-    p = payload or {}
-
-    explicit_title = str(p.get('title') or '').strip()
-    explicit_msg = str(p.get('message') or '').strip()
-    if explicit_title or explicit_msg:
-        return (explicit_title or 'QuantDinger'), (explicit_msg or '')
-
-    strategy = p.get('strategy') or {}
-    instrument = p.get('instrument') or {}
-    sig = p.get('signal') or {}
-    order = p.get('order') or {}
-
-    sname = str(strategy.get('name') or '').strip()
-    sym = str(instrument.get('symbol') or '').strip()
-    stype = str(sig.get('type') or sig.get('action') or '').strip()
-    side = str(sig.get('side') or '').strip()
-
-    title_bits: List[str] = []
-    if sname:
-        title_bits.append(sname)
-    if sym:
-        title_bits.append(sym)
-    if stype:
-        title_bits.append(stype.upper())
-    title = ' · '.join(title_bits) if title_bits else 'QuantDinger 信号'
-
-    body_lines: List[str] = []
-    if sname:
-        body_lines.append(f"策略: {sname}")
-    if sym:
-        body_lines.append(f"标的: {sym}")
-    if stype:
-        body_lines.append(f"信号: {stype}")
-    if side:
-        body_lines.append(f"方向: {side}")
-    try:
-        ref_price = float(order.get('ref_price') or 0)
-        if ref_price > 0:
-            body_lines.append(f"价格: {_fmt_float(ref_price)}")
-    except Exception:
-        pass
-    try:
-        stake = float(order.get('stake_amount') or 0)
-        if stake > 0:
-            body_lines.append(f"金额: {_fmt_float(stake)}")
-    except Exception:
-        pass
-    ts_iso = str(p.get('timestamp_iso') or '').strip()
-    if ts_iso:
-        body_lines.append(f"时间: {ts_iso}")
-
-    if not body_lines:
-        body_lines.append(_shorten(json.dumps(p, ensure_ascii=False), 800))
-
-    return title, "\n".join(body_lines)
+    host = (urlsplit(str(url or "")).netloc or "").lower()
+    raw = str(url or "").lower()
+    if "discord.com/api/webhooks" in raw:
+        return "discord"
+    if "open.feishu.cn" in host or "larksuite.com" in host:
+        return "feishu"
+    if "oapi.dingtalk.com" in host:
+        return "dingtalk"
+    if "qyapi.weixin.qq.com" in host or "work.weixin.qq.com" in host:
+        return "wecom"
+    if "hooks.slack.com" in host:
+        return "slack"
+    return "generic"
 
 
 def _adapt_payload_for_dialect(dialect: str, payload: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Translate the internal payload to the vendor's required JSON.
-
-    Each branch is documented inline because the field names differ
-    across platforms in ways that are easy to mis-remember:
-
-    - 飞书/Lark text 机器人: ``{msg_type: 'text', content: {text}}``
-    - 钉钉机器人 markdown:    ``{msgtype: 'markdown', markdown: {title, text}}``
-    - 企微/WeCom markdown:    ``{msgtype: 'markdown', markdown: {content}}``
-    - Slack incoming webhook: ``{text}``
-    """
-    title, body = _build_webhook_text(payload)
-
-    if dialect == 'feishu':
-        # Feishu/Lark text content cap is around 30k chars but the chat
-        # UI gets unreadable far before that; clamp at ~4k.
-        return {
-            "msg_type": "text",
-            "content": {"text": f"{title}\n{_shorten(body)}"},
-        }
-    if dialect == 'dingtalk':
-        # DingTalk markdown body must be non-empty *and* contain at
-        # least one of the keywords the bot was created with — but
-        # that's a user-config issue we can't fix here. The "###" prefix
-        # at least makes title visible.
-        return {
-            "msgtype": "markdown",
-            "markdown": {"title": _shorten(title, 64), "text": f"### {title}\n\n{_shorten(body)}"},
-        }
-    if dialect == 'wecom':
-        return {
-            "msgtype": "markdown",
-            "markdown": {"content": f"### {title}\n\n{_shorten(body, 4000)}"},
-        }
-    if dialect == 'slack':
-        return {"text": f"*{title}*\n{_shorten(body)}"}
-    return payload
+    text = _payload_text(payload)
+    if dialect == "feishu":
+        return {"msg_type": "text", "content": {"text": text}}
+    if dialect in ("dingtalk", "wecom"):
+        return {"msgtype": "text", "text": {"content": text}}
+    if dialect == "slack":
+        return {"text": text}
+    return payload or {}
 
 
-def _feishu_sign(secret: str, timestamp_str: str) -> str:
-    """
-    Feishu custom-bot signing algorithm.
-
-    Algorithm (per docs):
-      key = timestamp + "\\n" + secret  (utf-8)
-      digest = HMAC-SHA256(key, b"")
-      sign = base64(digest)
-
-    The timestamp and sign are then placed *inside* the JSON body, not
-    in headers. See:
-    https://open.feishu.cn/document/client-docs/bot-v3/add-custom-bot
-    """
-    key = f"{timestamp_str}\n{secret}".encode('utf-8')
-    digest = hmac.new(key, b"", hashlib.sha256).digest()
-    return base64.b64encode(digest).decode('utf-8')
+def _feishu_sign(secret: str, timestamp: str) -> str:
+    string_to_sign = f"{timestamp}\n{secret}".encode("utf-8")
+    digest = hmac.new(string_to_sign, b"", hashlib.sha256).digest()
+    return base64.b64encode(digest).decode("utf-8")
 
 
 def _dingtalk_signed_url(url: str, secret: str) -> str:
-    """
-    DingTalk custom-bot signing.
-
-    Algorithm:
-      string_to_sign = timestamp_ms + "\\n" + secret
-      digest = HMAC-SHA256(secret, string_to_sign)
-      sign = url_encode(base64(digest))
-    Then append &timestamp=...&sign=... to the URL.
-    """
-    ts_ms = str(int(time.time() * 1000))
-    string_to_sign = f"{ts_ms}\n{secret}"
-    digest = hmac.new(secret.encode('utf-8'), string_to_sign.encode('utf-8'), hashlib.sha256).digest()
-    sign = urllib.parse.quote_plus(base64.b64encode(digest).decode('utf-8'))
-    sep = '&' if ('?' in url) else '?'
-    return f"{url}{sep}timestamp={ts_ms}&sign={sign}"
+    ts = str(int(time.time() * 1000))
+    string_to_sign = f"{ts}\n{secret}".encode("utf-8")
+    digest = hmac.new(secret.encode("utf-8"), string_to_sign, hashlib.sha256).digest()
+    sign = quote_plus(base64.b64encode(digest).decode("utf-8"))
+    parts = urlsplit(str(url))
+    sep = "&" if parts.query else ""
+    query = f"{parts.query}{sep}timestamp={ts}&sign={sign}"
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, query, parts.fragment))
 
 
 def _check_vendor_response(dialect: str, status_code: int, text: str) -> Tuple[bool, str]:
-    """
-    Group-chat bots typically return HTTP 200 even on logical failures
-    (invalid signature, wrong msg_type, missing keyword, etc.) and put
-    the real result inside the JSON body. This checker normalises
-    that so a "silent failure" actually surfaces as an error to the
-    caller.
-
-    Vendor success codes:
-      - 飞书:   {"code": 0, "msg": "ok"} or {"StatusCode": 0}
-      - 钉钉:   {"errcode": 0, "errmsg": "ok"}
-      - 企微:   {"errcode": 0, "errmsg": "ok"}
-      - Slack:  plain text "ok" with HTTP 200
-    """
-    if status_code < 200 or status_code >= 300:
+    if not (200 <= int(status_code or 0) < 300):
         return False, f"http_{status_code}:{_shorten(text, 300)}"
-
-    body = (text or '').strip()
-    if dialect == 'slack':
-        return (body.lower() == 'ok' or body.startswith('{')), (
-            '' if (body.lower() == 'ok' or body.startswith('{')) else f"slack_unexpected:{_shorten(body, 300)}"
-        )
-
-    if dialect in ('feishu', 'dingtalk', 'wecom'):
-        if not body or not body.startswith('{'):
-            # Non-JSON 200 — vendor SDK still sometimes does this.
-            return True, ""
-        try:
-            obj = json.loads(body)
-        except Exception:
-            return True, ""
-        code = obj.get('code', obj.get('errcode', obj.get('StatusCode')))
-        if code in (0, '0', None):
-            return True, ""
-        msg = obj.get('msg') or obj.get('errmsg') or ''
-        return False, f"{dialect}_error:code={code}:{_shorten(msg, 200)}"
-
+    try:
+        data = json.loads(text or "{}")
+    except Exception:
+        data = {}
+    if dialect in ("feishu", "dingtalk", "wecom") and isinstance(data, dict):
+        code = data.get("StatusCode", data.get("code", data.get("errcode", 0)))
+        if str(code) not in ("", "0", "200"):
+            msg = data.get("msg") or data.get("errmsg") or data.get("StatusMessage") or text
+            return False, f"vendor_{code}:{_shorten(msg, 300)}"
     return True, ""
 
 
@@ -353,14 +208,6 @@ def _utc_ts_to_user_display(now: int, user_timezone: str) -> Tuple[str, str, str
         return iso, iso, "Time (UTC)"
 
 
-def _fmt_float(value: Any, *, max_decimals: int = 10) -> str:
-    try:
-        v = float(value or 0.0)
-    except Exception:
-        v = 0.0
-    s = f"{v:.{int(max_decimals)}f}"
-    s = s.rstrip("0").rstrip(".")
-    return s or "0"
 
 
 class SignalNotifier:
@@ -753,7 +600,6 @@ class SignalNotifier:
         user_id: int = None,
     ) -> Tuple[bool, str]:
         try:
-            now = int(time.time())
             # Get user_id from strategy if not provided
             if user_id is None:
                 if strategy_id is not None:

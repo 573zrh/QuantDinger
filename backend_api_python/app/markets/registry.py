@@ -144,11 +144,11 @@ MARKET_MODULES: Dict[str, MarketModule] = {
     "Forex": MarketModule(
         key="Forex",
         label="Forex",
-        description="FX pairs and precious metals routed through FX data sources and MT5.",
+        description="FX pairs and precious metals for research and backtesting.",
         asset_class="forex",
         symbol_hint="EURUSD",
         base_currency="USD",
-        features=["research", "backtest", "paper", "live"],
+        features=["research", "backtest", "paper"],
         data_requirements=[
             DataRequirement(
                 key="yfinance",
@@ -170,7 +170,7 @@ MARKET_MODULES: Dict[str, MarketModule] = {
                 purpose="FX fallback",
             ),
         ],
-        supports={"spot": True, "swap": False, "short": True, "session": "24/5"},
+        supports={"spot": True, "swap": False, "short": False, "session": "24/5"},
     ),
     "Futures": MarketModule(
         key="Futures",

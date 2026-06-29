@@ -5,7 +5,6 @@ import hashlib
 import json
 import math
 import re
-import threading
 import time as _time
 import traceback
 from datetime import datetime, timedelta
@@ -19,48 +18,13 @@ from app.data_sources import DataSourceFactory
 from app.utils.logger import get_logger
 from app.utils.db import get_db_connection
 from app.utils.risk_guard import trailing_exit_locks_net_profit
+from app.services.backtest_cache import KlineCache
 from app.services.indicator_params import IndicatorParamsParser, IndicatorCaller
 
 logger = get_logger(__name__)
 
 
-class _KlineCache:
-    """Simple in-memory K-line cache with TTL to avoid repeated external API calls."""
-
-    def __init__(self, max_size: int = 64):
-        self._store: Dict[str, Any] = {}
-        self._lock = threading.Lock()
-        self._max_size = max_size
-
-    @staticmethod
-    def _ttl_for_timeframe(timeframe: str) -> int:
-        if timeframe in ('1m', '5m', '15m', '30m'):
-            return 300   # 5 min for intraday
-        return 1800      # 30 min for daily+
-
-    def get(self, key: str) -> Optional[pd.DataFrame]:
-        with self._lock:
-            entry = self._store.get(key)
-            if entry is None:
-                return None
-            if _time.time() > entry['expires']:
-                del self._store[key]
-                return None
-            return entry['df'].copy()
-
-    def put(self, key: str, df: pd.DataFrame, timeframe: str):
-        ttl = self._ttl_for_timeframe(timeframe)
-        with self._lock:
-            if len(self._store) >= self._max_size:
-                oldest_key = min(self._store, key=lambda k: self._store[k]['expires'])
-                del self._store[oldest_key]
-            self._store[key] = {
-                'df': df.copy(),
-                'expires': _time.time() + ttl
-            }
-
-
-_kline_cache = _KlineCache()
+_kline_cache = KlineCache()
 
 
 class BacktestService:
@@ -74,17 +38,17 @@ class BacktestService:
     
     # Multi-timeframe backtest threshold configuration.
     # We pick the finest execution timeframe whose total candle count stays
-    # within ~25k bars — that's the empirical sweet spot where:
+    # within ~25k bars. This is the empirical sweet spot where:
     #   * CCXT paginated fetches stay under ~90 batches (well within budget),
     #   * the simulation loop completes in single-digit seconds,
     #   * the JSON response stays well under the frontend's 10-minute timeout.
     # If the user's date range exceeds the highest tier, we silently fall back
     # to a standard single-timeframe backtest (see `run_multi_timeframe`).
     MTF_CONFIG = {
-        'max_1m_days': 15,         # 1m: 15d × 1440 = 21,600 candles
-        'max_5m_days': 90,         # 5m: 90d × 288 = 25,920 candles (~86 CCXT calls)
-        'max_15m_days': 240,       # 15m: 240d × 96 = 23,040 candles (~77 CCXT calls)
-        'max_30m_days': 540,       # 30m: 540d × 48 = 25,920 candles (~86 CCXT calls)
+        'max_1m_days': 15,         # 1m: 15d x 1440 = 21,600 candles
+        'max_5m_days': 90,         # 5m: 90d x 288 = 25,920 candles (~86 CCXT calls)
+        'max_15m_days': 240,       # 15m: 240d x 96 = 23,040 candles (~77 CCXT calls)
+        'max_30m_days': 540,       # 30m: 540d x 48 = 25,920 candles (~86 CCXT calls)
         'default_exec_tf': '1m',   # Default execution timeframe
         'fallback_exec_tf': '5m',  # Fallback execution timeframe
     }
@@ -168,6 +132,66 @@ class BacktestService:
             else:
                 out[key] = value
         return out
+
+    def _signal_diagnostics(self, signals: Dict[str, Any], trade_direction: str) -> Dict[str, Any]:
+        """Return compact counts for explaining code signals vs execution signals."""
+        def count_series(value: Any) -> int:
+            try:
+                if hasattr(value, "fillna"):
+                    return int(value.fillna(False).astype(bool).sum())
+                return int(bool(value))
+            except Exception:
+                return 0
+
+        raw = {}
+        for key in ("buy", "sell", "open_long", "close_long", "open_short", "close_short"):
+            if key in (signals or {}):
+                raw[key] = count_series(signals.get(key))
+
+        direction = str(trade_direction or "both").lower()
+        if direction not in ("long", "short", "both"):
+            direction = "both"
+
+        normalized = {
+            "open_long": count_series(signals.get("open_long")),
+            "close_long": count_series(signals.get("close_long")),
+            "open_short": count_series(signals.get("open_short")),
+            "close_short": count_series(signals.get("close_short")),
+        }
+        if "buy" in (signals or {}) and "sell" in (signals or {}):
+            buy_count = count_series(signals.get("buy"))
+            sell_count = count_series(signals.get("sell"))
+            if direction == "long":
+                normalized.update({
+                    "open_long": buy_count,
+                    "close_long": sell_count,
+                    "open_short": 0,
+                    "close_short": 0,
+                })
+            elif direction == "short":
+                normalized.update({
+                    "open_long": 0,
+                    "close_long": 0,
+                    "open_short": sell_count,
+                    "close_short": buy_count,
+                })
+            else:
+                normalized.update({
+                    "open_long": buy_count,
+                    "close_long": 0,
+                    "open_short": sell_count,
+                    "close_short": 0,
+                })
+
+        entry_signals = normalized["open_long"] + normalized["open_short"]
+        exit_signals = normalized["close_long"] + normalized["close_short"]
+        return {
+            "raw": raw,
+            "normalized": normalized,
+            "tradeDirection": direction,
+            "entrySignals": entry_signals,
+            "exitSignals": exit_signals,
+        }
 
     def _attach_warmup_to_result(
         self,
@@ -273,7 +297,7 @@ class BacktestService:
 
         Strategy: pick the finest exec timeframe whose total candle count stays
         below ~25k bars. Longer windows degrade to coarser exec candles instead
-        of failing — so users still get *some* intra-bar precision over a 6+
+        of failing, so users still get *some* intra-bar precision over a 6+
         month range, just not 1-minute precision.
 
         Args:
@@ -745,6 +769,7 @@ class BacktestService:
         if df_signal.empty:
             raise ValueError("No candle data available in the backtest date range")
         signals = self._slice_signals_to_window(signals_full, df_signal.index)
+        signal_diagnostics = self._signal_diagnostics(signals, trade_direction)
         logger.info(f"Signals generated: {list(signals.keys()) if isinstance(signals, dict) else type(signals)}")
         
         # 3. Fetch execution timeframe candles (for precise trade simulation)
@@ -838,6 +863,7 @@ class BacktestService:
         try:
             logger.info("Formatting backtest result...")
             result = self._format_result(metrics, equity_curve, trades)
+            result['signalDiagnostics'] = signal_diagnostics
             result['precision_info'] = precision_info
             result['execution_timeframe'] = exec_tf
             result['signal_candles'] = len(df_signal)
@@ -928,7 +954,7 @@ class BacktestService:
         # parsing done in `run_multi_timeframe`/`run`/`run_strategy_script`. It's
         # used at the tail of this function by `_annotate_signal_bar_times` to
         # align each trade with the originating signal candle on the chart.
-        # Historically this was an unbound name here — any successful MTF run
+        # Historically this was an unbound name here, so any successful MTF run
         # would raise `NameError: name 'signal_timing' is not defined` at the
         # very last step, masking otherwise-correct results.
         exec_cfg = cfg.get('execution') or {}
@@ -967,7 +993,7 @@ class BacktestService:
         total_funding_paid = 0.0
 
         # Risk percentages are the underlying's % price move directly.
-        # Leverage only affects PnL magnitude and liquidation — it does NOT
+        # Leverage only affects PnL magnitude and liquidation; it does NOT
         # scale trigger thresholds.
         stop_loss_pct_eff = stop_loss_pct if stop_loss_pct > 0 else 0
         take_profit_pct_eff = take_profit_pct if take_profit_pct > 0 else 0
@@ -1079,8 +1105,8 @@ class BacktestService:
         logger.info(f"Signal timeframe: {signal_timeframe} ({signal_tf_seconds}s), Exec timeframe: {exec_timeframe} ({exec_tf_seconds}s)")
         
         # Preprocessing: create signal queue sorted by effective time.
-        # next_bar_open → first exec-bar open after signal bar closes.
-        # same_bar_close → last exec-bar close within the signal bar.
+        # next_bar_open -> first exec-bar open after signal bar closes.
+        # same_bar_close -> last exec-bar close within the signal bar.
         logger.info(
             f"Initializing signal queue (fill_mode={signal_fill_mode}, signal_timing={signal_timing})..."
         )
@@ -1217,7 +1243,7 @@ class BacktestService:
             if is_liquidated:
                 break
 
-            # Funding fee accrual — runs once per bar, BEFORE signal/SL processing
+            # Funding fee accrual runs once per bar, BEFORE signal/SL processing
             # so trades that close on this bar still pay one period of carry.
             # We charge for every funding boundary that falls within
             # [bar_open_ts, bar_open_ts + exec_tf). Multiple boundaries per bar
@@ -1252,7 +1278,7 @@ class BacktestService:
 
             # bar_time: floor of execution timestamp to signal timeframe.
             # This is the chart-bar that the front-end displays and is used to
-            # anchor buy/sell overlays — prevents sub-bar offset when exec_tf
+            # anchor buy/sell overlays, preventing sub-bar offset when exec_tf
             # is finer than signal_tf (e.g. 1m execution on a 1h chart).
             try:
                 bar_time_str = timestamp.floor(f'{signal_tf_seconds}s').strftime('%Y-%m-%d %H:%M')
@@ -2019,8 +2045,8 @@ class BacktestService:
         exchange_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
-        Live-aligned backtest: strict → closed-bar signals + next-bar open;
-        non-strict → same-bar signals + 1m execution path (crypto).
+        Live-aligned backtest: strict -> closed-bar signals + next-bar open;
+        non-strict -> same-bar signals + 1m execution path (crypto).
         """
         from app.services.backtest_execution import (
             merge_strict_mode_into_strategy_config,
@@ -2214,6 +2240,7 @@ class BacktestService:
         if df.empty:
             raise ValueError("No candle data available in the backtest date range")
         signals = self._slice_signals_to_window(signals_full, df.index)
+        signal_diagnostics = self._signal_diagnostics(signals, trade_direction)
         
         # 3. Simulate trading
         equity_curve, trades, total_commission = self._simulate_trading(
@@ -2233,6 +2260,7 @@ class BacktestService:
         
         # 5. Format result
         result = self._format_result(metrics, equity_curve, trades)
+        result['signalDiagnostics'] = signal_diagnostics
         result['executionAssumptions'] = self._execution_assumptions(
             strategy_config,
             simulation_mode='standard',
@@ -2254,7 +2282,7 @@ class BacktestService:
     
     @staticmethod
     def _attach_actual_range_to_result(result: Dict[str, Any], df: pd.DataFrame) -> None:
-        """因上游 K 线不足而缩短区间时，写入 executionAssumptions（供前端展示，非错误）。"""
+        """Attach actual data range when the requested window was shortened."""
         attrs = getattr(df, "attrs", None) or {}
         ar = attrs.get("backtestActualRange")
         if not ar:
@@ -2406,7 +2434,7 @@ class BacktestService:
         
         # Fetch data. We deliberately swallow any upstream exception (CCXT
         # network/rate-limit errors, yfinance hiccups, etc.) and return an empty
-        # DataFrame instead — the MTF entry point then falls back to a standard
+        # DataFrame instead, so the MTF entry point then falls back to a standard
         # backtest with a clear `mtfFallbackReason='data_unavailable'`, which is
         # far friendlier than bubbling up a 500.
         try:
@@ -2489,7 +2517,7 @@ class BacktestService:
                     effective_start, effective_end = alt_start, alt_end
                     window_adjusted = True
                     logger.info(
-                        f"[Backtest] 可用K线未覆盖所选起点，已从首根可用K线开始回测 "
+                        f"[Backtest] Available K-lines do not cover the requested start; using first available candle. "
                         f"{market}:{symbol} {timeframe} effective=[{effective_start} ~ {effective_end}]"
                     )
                 elif len(df) > 0:
@@ -2498,7 +2526,7 @@ class BacktestService:
                     effective_end = df_filtered.index.max()
                     window_adjusted = True
                     logger.info(
-                        f"[Backtest] 所选区间与可用数据无重叠，使用全部可用K线 "
+                        f"[Backtest] Requested window does not overlap available data; using all available candles. "
                         f"{market}:{symbol} {timeframe} [{effective_start} ~ {effective_end}]"
                     )
                 else:
@@ -2521,12 +2549,12 @@ class BacktestService:
                     effective_end = df_filtered.index.max()
                     used_fallback = True
                     logger.debug(
-                        f"[Backtest] 过滤后为空，已回退为最近 {len(df_filtered)} 根K线 "
+                        f"[Backtest] Filtered window is empty; falling back to latest {len(df_filtered)} candles. "
                         f"{market}:{symbol} {timeframe} ({effective_start} ~ {effective_end})"
                     )
                 else:
                     logger.debug(
-                        f"[Backtest] 过滤后无K线 {market}:{symbol} {timeframe} "
+                        f"[Backtest] Filtered window has no K-lines: {market}:{symbol} {timeframe} "
                         f"upstream={data_start}~{data_end}"
                     )
                     return pd.DataFrame()
@@ -2775,7 +2803,7 @@ class BacktestService:
                             ctx.position.close_short()
                         continue
 
-                    # Explicit hedge intents — ctx.close_long / close_short /
+                    # Explicit hedge intents from ctx.close_long / close_short /
                     # open_long / open_short. Keep both legs independent.
                     if intent == 'close_long':
                         if ctx.position.has_long():
@@ -3177,7 +3205,7 @@ class BacktestService:
                     'balance': 0
                 })
                 equity_curve.append({'time': timestamp.strftime('%Y-%m-%d %H:%M'), 'value': 0})
-                break  # 直接停止
+                break
             
             # Use OHLC to evaluate triggers.
             high = row['high']
@@ -4093,7 +4121,7 @@ class BacktestService:
                     else:
                         # SL not strict enough, liquidation triggered
                         logger.warning(f"Long liquidation! entry={entry_price:.2f}, low={low:.2f}, "
-                                     f"爆仓线={liquidation_price:.2f}, 止损价={stop_loss_price:.2f}")
+                                     f"liquidation_price={liquidation_price:.2f}, stop_loss_price={stop_loss_price:.2f}")
                         is_liquidated = True
                         liquidation_loss = self._liquidation_loss(capital)
                         capital = 0
@@ -4116,7 +4144,7 @@ class BacktestService:
                     stop_loss_price = close_short_price_arr[i] if has_stop_loss else 0
                     
                     logger.warning(f"[candle {i}] Short hit liquidation! entry={entry_price:.2f}, high={high:.2f}, liq_price={liquidation_price:.2f}, "
-                              f"止损信号={close_short_arr[i]}, 止损价={stop_loss_price:.4f}, 时间={timestamp}")
+                              f"stop_signal={close_short_arr[i]}, stop_loss_price={stop_loss_price:.4f}, time={timestamp}")
                     
                     # Determine SL or liquidation first
                     if has_stop_loss and stop_loss_price < liquidation_price:
@@ -4139,7 +4167,7 @@ class BacktestService:
                     else:
                         # SL not strict enough, liquidation triggered
                         logger.warning(f"Short liquidation! entry={entry_price:.2f}, high={high:.2f}, "
-                                     f"爆仓线={liquidation_price:.2f}, 止损价={stop_loss_price:.2f}")
+                                     f"liquidation_price={liquidation_price:.2f}, stop_loss_price={stop_loss_price:.2f}")
                         is_liquidated = True
                         liquidation_loss = self._liquidation_loss(capital)
                         capital = 0
@@ -4242,7 +4270,7 @@ class BacktestService:
         end_date: datetime,
         total_commission: float = 0
     ) -> Dict:
-        """计算回测指标"""
+        """Calculate backtest metrics."""
         if not equity_curve:
             return {}
         
@@ -4309,7 +4337,7 @@ class BacktestService:
         }
     
     def _calculate_max_drawdown(self, values: List[float]) -> float:
-        """计算最大回撤"""
+        """Calculate maximum drawdown."""
         if not values:
             return 0
         
@@ -4327,12 +4355,12 @@ class BacktestService:
     
     def _calculate_sharpe(self, values: List[float], timeframe: str = '1D', risk_free_rate: float = 0.02) -> float:
         """
-        计算夏普比率
+        Calculate Sharpe ratio.
         
         Args:
-            values: 权益曲线数值列表
-            timeframe: 时间周期
-            risk_free_rate: 无风险收益率（年化）
+            values: Equity curve values.
+            timeframe: Bar timeframe.
+            risk_free_rate: Annualized risk-free rate.
         """
         if len(values) < 2:
             return 0
@@ -4345,11 +4373,11 @@ class BacktestService:
         # Determine annualization factor by timeframe
         annualization_factor = {
             '1m': 252 * 24 * 60,      # 1m candle: ~362,880
-            '5m': 252 * 24 * 12,      # 5分钟K：约72,576
-            '15m': 252 * 24 * 4,      # 15分钟K：约24,192
-            '30m': 252 * 24 * 2,      # 30分钟K：约12,096
+            '5m': 252 * 24 * 12,      # 5m candle: ~72,576
+            '15m': 252 * 24 * 4,      # 15m candle: ~24,192
+            '30m': 252 * 24 * 2,      # 30m candle: ~12,096
             '1H': 252 * 24,           # 1H candle: 6,048
-            '4H': 252 * 6,            # 4小时K：1,512
+            '4H': 252 * 6,            # 4H candle: 1,512
             '1D': 252,                # 1D candle: 252
             '1W': 52                  # 1W candle: 52
         }.get(timeframe, 252)
@@ -4452,7 +4480,7 @@ class BacktestService:
         For pure signal-triggered open/close (no _stop/_profit/_trailing/liquidation
         suffix) under `next_bar_open`, signal bar is exactly one signal_tf BEFORE
         the execution bar. For SL/TP/trailing/liquidation triggers, there is no
-        meaningful "signal bar" — they fire intra-bar from the price path — so we
+        meaningful "signal bar"; they fire intra-bar from the price path, so we
         align signal_bar_time to bar_time so the renderer only draws a single marker.
         For `bar_close` execution mode, signal and execution coincide on the same bar.
         """
@@ -4494,7 +4522,7 @@ class BacktestService:
         equity_curve: List,
         trades: List
     ) -> Dict[str, Any]:
-        """格式化回测结果"""
+        """Format backtest result for API responses."""
         # Simplify equity curve
         max_points = 500
         if len(equity_curve) > max_points:
@@ -4503,7 +4531,7 @@ class BacktestService:
         
         # Clean NaN/Inf values for JSON serialization
         def clean_value(value):
-            """清理数值，将NaN/Inf转换为0"""
+            """Clean NaN/Inf values."""
             if isinstance(value, float):
                 if np.isnan(value) or np.isinf(value):
                     return 0

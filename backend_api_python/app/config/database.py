@@ -1,10 +1,8 @@
-"""
-数据库和缓存配置
-"""
+"""Database and cache configuration."""
 import os
 
 class MetaRedisConfig(type):
-    """Redis 配置"""
+    """Redis connection settings."""
     
     @property
     def HOST(cls):
@@ -36,18 +34,18 @@ class MetaRedisConfig(type):
 
 
 class RedisConfig(metaclass=MetaRedisConfig):
-    """Redis 缓存配置"""
+    """Redis cache configuration."""
     
     @classmethod
     def get_url(cls) -> str:
-        """获取 Redis 连接 URL"""
+        """Return the Redis connection URL."""
         if cls.PASSWORD:
             return f"redis://:{cls.PASSWORD}@{cls.HOST}:{cls.PORT}/{cls.DB}"
         return f"redis://{cls.HOST}:{cls.PORT}/{cls.DB}"
 
 
 class MetaCacheConfig(type):
-    """缓存业务配置"""
+    """Business cache settings."""
     
     @property
     def ENABLED(cls):
@@ -60,14 +58,14 @@ class MetaCacheConfig(type):
     @property
     def KLINE_CACHE_TTL(cls):
         return {
-            '1m': 5,       # 1分钟K线缓存5秒
-            '3m': 30,      # 3分钟K线缓存30秒
-            '5m': 60,      # 5分钟K线缓存1分钟
-            '15m': 300,    # 15分钟K线缓存5分钟
-            '30m': 300,    # 30分钟K线缓存5分钟
-            '1H': 300,     # 1小时K线缓存5分钟
-            '4H': 300,     # 4小时K线缓存5分钟
-            '1D': 300,     # 日K线缓存5分钟
+            '1m': 5,       # Cache 1m K-lines for 5 seconds
+            '3m': 30,      # Cache 3m K-lines for 30 seconds
+            '5m': 60,      # Cache 5m K-lines for 1 minute
+            '15m': 300,    # Cache 15m K-lines for 5 minutes
+            '30m': 300,    # Cache 30m K-lines for 5 minutes
+            '1H': 300,     # Cache 1H K-lines for 5 minutes
+            '4H': 300,     # Cache 4H K-lines for 5 minutes
+            '1D': 300,     # Cache 1D K-lines for 5 minutes
             '1h': 300,
             '4h': 300,
             '1d': 300,
@@ -83,5 +81,5 @@ class MetaCacheConfig(type):
 
 
 class CacheConfig(metaclass=MetaCacheConfig):
-    """缓存配置"""
+    """Cache configuration."""
     pass

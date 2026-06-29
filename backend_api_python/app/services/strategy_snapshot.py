@@ -209,7 +209,10 @@ class StrategySnapshotResolver:
         script_source_id_int = int(script_source_id) if str(script_source_id or "").isdigit() else None
         code = ""
         if is_script:
-            code = self._fetch_script_source_code(script_source_id).strip() if script_source_id else ""
+            override_code = override.get("codeOverride") or override.get("scriptCode") or override.get("strategy_code")
+            code = str(override_code or "").strip()
+            if not code:
+                code = self._fetch_script_source_code(script_source_id).strip() if script_source_id else ""
             if not code:
                 code = (strategy.get("strategy_code") or "").strip()
         else:

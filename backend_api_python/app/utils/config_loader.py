@@ -1,4 +1,4 @@
-﻿"""
+"""
 Config loader (local-only).
 
 This project is fully localized: all sensitive configuration should come from

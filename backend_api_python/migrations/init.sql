@@ -635,9 +635,12 @@ CREATE TABLE IF NOT EXISTS qd_indicator_codes (
    review_note text DEFAULT ''::text NULL,
    reviewed_at timestamp NULL,
    reviewed_by int4 NULL,
+   asset_type varchar(32) DEFAULT 'indicator'::character varying NULL,
     -- 对已购用户而言，本地副本通过此字段关联到市场上的原始指标，
     -- 用于后续"同步代码"功能拉取发布者的最新版本
     source_indicator_id int4 NULL,
+    source_script_source_id int4 NULL,
+    source_strategy_id int4 NULL,
     -- 多语言支持：用户上传的 name / description 用 source_language 标识原始语言
     -- (zh-CN / en-US / ja-JP 等)；name_i18n / description_i18n 是 LLM 翻译生成的
     -- JSONB，结构形如 {"en-US": "...", "zh-CN": "...", ...}。
@@ -654,6 +657,25 @@ CREATE TABLE IF NOT EXISTS qd_indicator_codes (
 CREATE INDEX IF NOT EXISTS idx_indicator_codes_user_id ON qd_indicator_codes USING btree (user_id);
 CREATE INDEX IF NOT EXISTS idx_indicator_review_status ON qd_indicator_codes USING btree (review_status);
 CREATE INDEX IF NOT EXISTS idx_indicator_codes_source ON qd_indicator_codes USING btree (source_indicator_id);
+CREATE INDEX IF NOT EXISTS idx_indicator_codes_source_script ON qd_indicator_codes USING btree (source_script_source_id);
+CREATE INDEX IF NOT EXISTS idx_indicator_codes_source_strategy ON qd_indicator_codes USING btree (source_strategy_id);
+
+CREATE TABLE IF NOT EXISTS qd_indicator_code_versions (
+   id serial4 NOT NULL,
+   indicator_id int4 NOT NULL,
+   user_id int4 NOT NULL,
+   version_no int4 NOT NULL,
+   name varchar(255) DEFAULT ''::character varying NOT NULL,
+   description text DEFAULT ''::text NULL,
+   code text NOT NULL,
+   created_at timestamp DEFAULT now(),
+   CONSTRAINT qd_indicator_code_versions_pkey PRIMARY KEY (id),
+   CONSTRAINT qd_indicator_code_versions_indicator_fkey FOREIGN KEY (indicator_id) REFERENCES qd_indicator_codes(id) ON DELETE CASCADE,
+   CONSTRAINT qd_indicator_code_versions_user_fkey FOREIGN KEY (user_id) REFERENCES qd_users(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_indicator_code_versions_indicator ON qd_indicator_code_versions USING btree (indicator_id, version_no DESC);
+CREATE INDEX IF NOT EXISTS idx_indicator_code_versions_user ON qd_indicator_code_versions USING btree (user_id);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_indicator_code_versions_no ON qd_indicator_code_versions USING btree (indicator_id, version_no);
 
 -- =============================================================================
 -- 10. Watchlist
@@ -869,6 +891,24 @@ CREATE TABLE IF NOT EXISTS qd_market_symbols (
 
 CREATE INDEX IF NOT EXISTS idx_market_symbols_market ON qd_market_symbols(market);
 CREATE INDEX IF NOT EXISTS idx_market_symbols_is_hot ON qd_market_symbols(market, is_hot);
+CREATE INDEX IF NOT EXISTS idx_market_symbols_market_upper_symbol
+  ON qd_market_symbols(market, UPPER(symbol));
+
+CREATE TABLE IF NOT EXISTS qd_market_symbol_aliases (
+    id SERIAL PRIMARY KEY,
+    market VARCHAR(50) NOT NULL,
+    symbol VARCHAR(50) NOT NULL,
+    alias VARCHAR(255) NOT NULL,
+    is_active INTEGER DEFAULT 1,
+    sort_order INTEGER DEFAULT 0,
+    created_at TIMESTAMP DEFAULT NOW(),
+    UNIQUE(market, symbol, alias)
+);
+
+CREATE INDEX IF NOT EXISTS idx_market_symbol_aliases_lookup
+  ON qd_market_symbol_aliases(market, alias);
+CREATE INDEX IF NOT EXISTS idx_market_symbol_aliases_upper_lookup
+  ON qd_market_symbol_aliases(market, UPPER(alias));
 
 -- Seed data: Hot symbols for each market
 INSERT INTO qd_market_symbols (market, symbol, name, exchange, currency, is_active, is_hot, sort_order) VALUES

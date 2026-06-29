@@ -43,6 +43,7 @@ ADMIN_USER_VALUE=""
 ADMIN_PASSWORD_VALUE=""
 ADMIN_EMAIL_VALUE=""
 FRONTEND_PORT_VALUE=""
+MOBILE_PORT_VALUE=""
 BACKEND_PORT_VALUE=""
 POSTGRES_PASSWORD_VALUE=""
 IMAGE_PREFIX_VALUE=""
@@ -192,6 +193,7 @@ collect_settings() {
     existing_email=$(env_get "$BACKEND_ENV" "ADMIN_EMAIL")
     existing_password=$(env_get "$BACKEND_ENV" "ADMIN_PASSWORD")
     existing_frontend_port=$(env_get "$ROOT_ENV" "FRONTEND_PORT")
+    existing_mobile_port=$(env_get "$ROOT_ENV" "MOBILE_PORT")
     existing_backend_port=$(env_get "$ROOT_ENV" "BACKEND_PORT")
     existing_pg_password=$(env_get "$ROOT_ENV" "POSTGRES_PASSWORD")
     existing_image_prefix=$(env_get "$ROOT_ENV" "IMAGE_PREFIX")
@@ -224,6 +226,7 @@ collect_settings() {
     fi
 
     FRONTEND_PORT_VALUE=$(read_line "Frontend port" "${existing_frontend_port:-8888}")
+    MOBILE_PORT_VALUE=$(read_line "Mobile H5 port" "${existing_mobile_port:-8889}")
     BACKEND_PORT_VALUE=$(read_line "Backend bind address" "${existing_backend_port:-127.0.0.1:5000}")
 
     if [ -n "$existing_pg_password" ]; then
@@ -258,9 +261,10 @@ write_settings() {
     env_set "$BACKEND_ENV" "ADMIN_USER" "$ADMIN_USER_VALUE"
     env_set "$BACKEND_ENV" "ADMIN_PASSWORD" "$ADMIN_PASSWORD_VALUE"
     env_set "$BACKEND_ENV" "ADMIN_EMAIL" "$ADMIN_EMAIL_VALUE"
-    env_set "$BACKEND_ENV" "FRONTEND_URL" "http://localhost:${FRONTEND_PORT_VALUE}"
+    env_set "$BACKEND_ENV" "FRONTEND_URL" "http://localhost:${FRONTEND_PORT_VALUE},http://localhost:${MOBILE_PORT_VALUE}"
 
     env_set "$ROOT_ENV" "FRONTEND_PORT" "$FRONTEND_PORT_VALUE"
+    env_set "$ROOT_ENV" "MOBILE_PORT" "$MOBILE_PORT_VALUE"
     env_set "$ROOT_ENV" "BACKEND_PORT" "$BACKEND_PORT_VALUE"
     env_set "$ROOT_ENV" "POSTGRES_PASSWORD" "$POSTGRES_PASSWORD_VALUE"
     env_set "$ROOT_ENV" "IMAGE_PREFIX" "$IMAGE_PREFIX_VALUE"
@@ -298,6 +302,7 @@ print_summary() {
     say "${GREEN}QuantDinger is ready.${NC}"
     say ""
     say "Web UI:      http://localhost:${FRONTEND_PORT_VALUE}"
+    say "Mobile H5:   http://localhost:${MOBILE_PORT_VALUE}"
     say "API:         http://127.0.0.1:${BACKEND_PORT_VALUE##*:}"
     say "Directory:   ${INSTALL_DIR}"
     say "Username:    ${ADMIN_USER_VALUE}"
