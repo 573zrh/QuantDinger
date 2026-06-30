@@ -1,0 +1,105 @@
+# QuantX Docker Compose 一键部署
+# 用法:
+#   1. cp .env.example .env  并修改配置
+#   2. docker compose up -d --build
+#   3. 访问 http://localhost:5000/api/health 确认服务正常
+
+services:
+  # ========================
+  # PostgreSQL 数据库
+  # ========================
+  postgres:
+    image: postgres:16-alpine
+    container_name: quantx-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-quantx}
+      POSTGRES_USER: ${POSTGRES_USER:-quantx}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-quantx123}
+      TZ: ${TZ:-Asia/Shanghai}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./migrations/init.sql:/docker-entrypoint-initdb.d/01-init.sql
+    ports:
+      - "${DB_PORT:-127.0.0.1:5432}:5432"
+    networks:
+      - quantx-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-quantx} -d ${POSTGRES_DB:-quantx}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ========================
+  # Redis 缓存
+  # ========================
+  redis:
+    image: redis:7-alpine
+    container_name: quantx-redis
+    restart: unless-stopped
+    command: ["redis-server", "--maxmemory", "128mb", "--maxmemory-policy", "allkeys-lru"]
+    ports:
+      - "${REDIS_PORT:-127.0.0.1:6379}:6379"
+    networks:
+      - quantx-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ========================
+  # Backend API (Python/Flask)
+  # ========================
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: quantx-backend
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "${BACKEND_PORT:-127.0.0.1:5000}:5000"
+    volumes:
+      - backend_logs:/app/logs
+      - backend_data:/app/data
+    environment:
+      - HOST=0.0.0.0
+      - PORT=5000
+      - TZ=${TZ:-Asia/Shanghai}
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-quantx}:${POSTGRES_PASSWORD:-quantx123}@postgres:5432/${POSTGRES_DB:-quantx}
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - ENABLE_CACHE=${ENABLE_CACHE:-true}
+      - SECRET_KEY=${SECRET_KEY:-quantx-secret-key-change-me}
+      - ADMIN_USER=${ADMIN_USER:-admin}
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD:-admin123}
+      - DB_POOL_MIN=${DB_POOL_MIN:-5}
+      - DB_POOL_MAX=${DB_POOL_MAX:-50}
+      - DB_POOL_ACQUIRE_TIMEOUT=${DB_POOL_ACQUIRE_TIMEOUT:-10}
+      - GUNICORN_WORKERS=${GUNICORN_WORKERS:-1}
+      - GUNICORN_THREADS=${GUNICORN_THREADS:-4}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    networks:
+      - quantx-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+volumes:
+  postgres_data:
+    driver: local
+  backend_logs:
+    driver: local
+  backend_data:
+    driver: local
+
+networks:
+  quantx-network:
+    driver: bridge
